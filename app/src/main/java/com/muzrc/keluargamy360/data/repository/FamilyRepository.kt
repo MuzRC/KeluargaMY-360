@@ -1,6 +1,7 @@
 package com.muzrc.keluargamy360.data.repository
 
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.UserProfileChangeRequest
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.muzrc.keluargamy360.data.local.SecureStorage
@@ -21,9 +22,6 @@ class FamilyRepository(
         return (1..6).map { chars[random.nextInt(chars.length)] }.joinToString("")
     }
 
-    /**
-     * Cipta kumpulan keluarga baharu, jana Kunci Utama AES-256, dan lindunginya dengan PIN.
-     */
     suspend fun createFamily(familyName: String, securityPin: String): Result<FamilyGroup> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(Exception("Sesi log masuk tamat. Sila log masuk semula."))
@@ -58,9 +56,6 @@ class FamilyRepository(
         }
     }
 
-    /**
-     * Sertai kumpulan keluarga sedia ada menggunakan Kod Jemputan + PIN Keselamatan.
-     */
     suspend fun joinFamily(inviteCode: String, securityPin: String): Result<FamilyGroup> {
         val uid = auth.currentUser?.uid
             ?: return Result.failure(Exception("Sesi log masuk tamat. Sila log masuk semula."))
@@ -81,7 +76,6 @@ class FamilyRepository(
             val group = doc.toObject(FamilyGroup::class.java)
                 ?: return Result.failure(Exception("Data kumpulan keluarga tidak sah."))
 
-            // Cuba nyahsulit Kunci Utama Keluarga menggunakan PIN yang dimasukkan
             val masterKey = CryptoHelper.unwrapKeyWithPin(
                 wrappedKeyBase64 = group.wrappedMasterKey,
                 ivBase64 = group.keyIv,
@@ -104,9 +98,6 @@ class FamilyRepository(
         }
     }
 
-    /**
-     * Nyahsulit Kunci Utama Keluarga bagi ahli sedia ada menggunakan PIN 6-digit sahaja.
-     */
     suspend fun unlockFamilyWithPin(familyId: String, securityPin: String): Result<FamilyGroup> {
         return try {
             val doc = db.collection("families").document(familyId).get().await()
@@ -134,5 +125,43 @@ class FamilyRepository(
         } catch (e: Exception) {
             null
         }
+    }
+
+    suspend fun updateDisplayName(newName: String): Result<Unit> {
+        val user = auth.currentUser ?: return Result.failure(Exception("Tidak log masuk"))
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return Result.failure(Exception("Nama tidak boleh kosong"))
+
+        return try {
+            val req = UserProfileChangeRequest.Builder().setDisplayName(trimmed).build()
+            user.updateProfile(req).await()
+            db.collection("users").document(user.uid).update("name", trimmed).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeMemberFromFamily(familyId: String, targetUid: String): Result<Unit> {
+        return try {
+            db.collection("families").document(familyId)
+                .update("memberIds", FieldValue.arrayRemove(targetUid))
+                .await()
+            db.collection("families").document(familyId)
+                .collection("locations").document(targetUid)
+                .delete()
+                .await()
+            db.collection("users").document(targetUid)
+                .update("familyId", "")
+                .await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun leaveFamily(familyId: String): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.failure(Exception("Tidak log masuk"))
+        return removeMemberFromFamily(familyId, uid)
     }
 }
