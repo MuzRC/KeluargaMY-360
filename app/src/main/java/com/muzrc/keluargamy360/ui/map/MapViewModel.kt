@@ -14,16 +14,21 @@ import com.google.android.gms.location.LocationServices
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.Query
 import com.muzrc.keluargamy360.data.local.SecureStorage
+import com.muzrc.keluargamy360.data.model.ActivityLogItem
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.data.model.FamilyGroup
+import com.muzrc.keluargamy360.data.model.HistoryPoint
 import com.muzrc.keluargamy360.data.model.SafePlace
 import com.muzrc.keluargamy360.data.model.User
 import com.muzrc.keluargamy360.data.model.UserLocation
+import com.muzrc.keluargamy360.data.repository.FamilyRepository
 import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.service.GeofenceReceiver
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.CryptoHelper
+import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PermissionHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,10 +45,17 @@ data class MapUiState(
     val members: List<DecryptedMemberLocation> = emptyList(),
     val selectedMember: DecryptedMemberLocation? = null,
     val safePlaces: List<SafePlace> = emptyList(),
+    val activityLogs: List<ActivityLogItem> = emptyList(),
+    val activeHistoryRoute: List<HistoryPoint> = emptyList(),
+    val historyOwnerName: String? = null,
     val activeSosAlert: String? = null,
     val statusMessage: String? = null,
     val isSendingSos: Boolean = false,
-    val isTrackingEnabled: Boolean = true
+    val isTrackingEnabled: Boolean = true,
+    val lowBatteryAlertEnabled: Boolean = true,
+    val speedAlertEnabled: Boolean = true,
+    val speedLimitKmh: Float = 110f,
+    val crashDetectionEnabled: Boolean = true
 )
 
 class MapViewModel(
@@ -54,9 +66,16 @@ class MapViewModel(
 ) : ViewModel() {
 
     private val locationRepository = LocationRepository(secureStorage)
+    private val familyRepository = FamilyRepository(secureStorage)
 
     private val _uiState = MutableStateFlow(
-        MapUiState(isTrackingEnabled = secureStorage.isTrackingEnabled())
+        MapUiState(
+            isTrackingEnabled = secureStorage.isTrackingEnabled(),
+            lowBatteryAlertEnabled = secureStorage.isLowBatteryAlertEnabled(),
+            speedAlertEnabled = secureStorage.isSpeedAlertEnabled(),
+            speedLimitKmh = secureStorage.getSpeedLimitKmh(),
+            crashDetectionEnabled = secureStorage.isCrashDetectionEnabled()
+        )
     )
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
 
@@ -67,6 +86,9 @@ class MapViewModel(
     private val userProfilesCache = mutableMapOf<String, User>()
     private val addressCache = mutableMapOf<String, String>()
     private val sessionStartTime = System.currentTimeMillis()
+
+    val currentUserId: String
+        get() = auth.currentUser?.uid.orEmpty()
 
     init {
         startRealtimeListeners()
@@ -90,6 +112,7 @@ class MapViewModel(
             }
         }
 
+        // 1. Lokasi ahli masa nyata
         locationsListener?.remove()
         locationsListener = db.collection("families").document(familyId)
             .collection("locations")
@@ -147,6 +170,7 @@ class MapViewModel(
                 }
             }
 
+        // 2. Zon Selamat (Keluarga + Peribadi)
         placesListener?.remove()
         placesListener = db.collection("families").document(familyId)
             .collection("places")
@@ -160,25 +184,50 @@ class MapViewModel(
                 registerSystemGeofences(combinedPlaces)
             }
 
+        // 3. Log Aktiviti Keluarga & Amaran Masa Nyata (SOS, Ring Device, Bateri, Laju)
         alertsListener?.remove()
         alertsListener = db.collection("families").document(familyId)
             .collection("alerts")
-            .whereGreaterThan("timestamp", sessionStartTime)
+            .orderBy("timestamp", Query.Direction.DESCENDING)
+            .limit(40)
             .addSnapshotListener { snapshot, _ ->
                 if (snapshot == null) return@addSnapshotListener
+
+                val logs = snapshot.documents.map { doc ->
+                    ActivityLogItem(
+                        id = doc.id,
+                        type = doc.getString("type") ?: "INFO",
+                        senderId = doc.getString("senderId").orEmpty(),
+                        senderName = doc.getString("senderName") ?: "Ahli",
+                        message = doc.getString("message").orEmpty(),
+                        timestamp = doc.getLong("timestamp") ?: 0L
+                    )
+                }
+                _uiState.update { it.copy(activityLogs = logs) }
+
                 for (change in snapshot.documentChanges) {
-                    val senderId = change.document.getString("senderId") ?: continue
-                    if (senderId == auth.currentUser?.uid) continue
+                    val doc = change.document
+                    val timestamp = doc.getLong("timestamp") ?: 0L
+                    if (timestamp <= sessionStartTime) continue
 
-                    val alertType = change.document.getString("type") ?: "SOS"
-                    val senderName = change.document.getString("senderName") ?: "Ahli Keluarga"
-                    val msg = change.document.getString("message")
-                        ?: "AMARAN SOS daripada $senderName! Sila semak lokasi beliau segera."
+                    val senderId = doc.getString("senderId").orEmpty()
+                    val targetUid = doc.getString("targetUid").orEmpty()
+                    val alertType = doc.getString("type").orEmpty()
+                    val msg = doc.getString("message").orEmpty()
 
-                    if (alertType == "CHECKIN") {
+                    if (alertType == "RING" && targetUid == currentUserId) {
+                        DeviceRingerHelper.ringLoudlyFor15Seconds(appContext)
                         _uiState.update { it.copy(statusMessage = msg) }
-                    } else {
-                        _uiState.update { it.copy(activeSosAlert = msg) }
+                        continue
+                    }
+
+                    if (senderId == currentUserId) continue
+
+                    when (alertType) {
+                        "SOS" -> _uiState.update { it.copy(activeSosAlert = msg) }
+                        "CHECKIN", "BATTERY", "SPEED", "GEOFENCE" -> {
+                            _uiState.update { it.copy(statusMessage = msg) }
+                        }
                     }
                 }
             }
@@ -223,59 +272,161 @@ class MapViewModel(
         _uiState.update { it.copy(selectedMember = member) }
     }
 
+    fun load24HourRoute(member: DecryptedMemberLocation) {
+        viewModelScope.launch {
+            val points = locationRepository.get24HourHistory(member.uid)
+            if (points.size < 2) {
+                _uiState.update {
+                    it.copy(
+                        activeHistoryRoute = emptyList(),
+                        historyOwnerName = null,
+                        statusMessage = "Belum cukup rekod pergerakan 24 jam untuk ${member.name}."
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        selectedMember = member,
+                        activeHistoryRoute = points,
+                        historyOwnerName = member.name,
+                        statusMessage = "Memaparkan ${points.size} titik laluan 24 jam ${member.name}."
+                    )
+                }
+            }
+        }
+    }
+
+    fun clear24HourRoute() {
+        _uiState.update { it.copy(activeHistoryRoute = emptyList(), historyOwnerName = null) }
+    }
+
+    fun ringMemberDevice(member: DecryptedMemberLocation) {
+        viewModelScope.launch {
+            val res = locationRepository.sendRingRequest(member.uid, member.name)
+            res.fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(statusMessage = "Isyarat deringan penggera telah dihantar ke telefon ${member.name}!")
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(statusMessage = "Gagal menghantar deringan: ${err.message}") }
+                }
+            )
+        }
+    }
+
+    fun updateMyDisplayName(newName: String) {
+        viewModelScope.launch {
+            familyRepository.updateDisplayName(newName).fold(
+                onSuccess = {
+                    val uid = currentUserId
+                    userProfilesCache[uid]?.let { userProfilesCache[uid] = it.copy(name = newName.trim()) }
+                    _uiState.update { it.copy(statusMessage = "Nama paparan berjaya ditukar ke '${newName.trim()}'.") }
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(statusMessage = "Gagal menukar nama: ${err.message}") }
+                }
+            )
+        }
+    }
+
+    fun removeMember(member: DecryptedMemberLocation) {
+        val familyId = secureStorage.getFamilyId() ?: return
+        viewModelScope.launch {
+            familyRepository.removeMemberFromFamily(familyId, member.uid).fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(
+                            members = it.members.filter { m -> m.uid != member.uid },
+                            statusMessage = "${member.name} telah dikeluarkan daripada kumpulan."
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(statusMessage = "Gagal mengeluarkan ahli: ${err.message}") }
+                }
+            )
+        }
+    }
+
+    fun leaveCurrentFamily(onLeftSuccess: () -> Unit) {
+        val familyId = secureStorage.getFamilyId() ?: return
+        viewModelScope.launch {
+            familyRepository.leaveFamily(familyId).fold(
+                onSuccess = {
+                    LocationTrackingService.stop(appContext)
+                    secureStorage.clearSession()
+                    onLeftSuccess()
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(statusMessage = "Gagal keluar kumpulan: ${err.message}") }
+                }
+            )
+        }
+    }
+
     fun toggleTracking(enabled: Boolean) {
         secureStorage.setTrackingEnabled(enabled)
         _uiState.update {
             it.copy(
                 isTrackingEnabled = enabled,
-                statusMessage = if (enabled) {
-                    "Perkongsian lokasi masa nyata disambung semula."
-                } else {
-                    "Perkongsian lokasi dijeda sementara."
-                }
+                statusMessage = if (enabled) "Perkongsian GPS disambung semula." else "Perkongsian GPS dijeda sementara."
             )
         }
-        if (enabled) {
-            LocationTrackingService.start(appContext)
-        } else {
-            LocationTrackingService.stop(appContext)
-        }
+        if (enabled) LocationTrackingService.start(appContext) else LocationTrackingService.stop(appContext)
+    }
+
+    fun toggleLowBatteryAlert(enabled: Boolean) {
+        secureStorage.setLowBatteryAlertEnabled(enabled)
+        _uiState.update { it.copy(lowBatteryAlertEnabled = enabled) }
+    }
+
+    fun toggleSpeedAlert(enabled: Boolean) {
+        secureStorage.setSpeedAlertEnabled(enabled)
+        _uiState.update { it.copy(speedAlertEnabled = enabled) }
+    }
+
+    fun setSpeedLimit(limitKmh: Float) {
+        secureStorage.setSpeedLimitKmh(limitKmh)
+        _uiState.update { it.copy(speedLimitKmh = limitKmh) }
+    }
+
+    fun toggleCrashDetection(enabled: Boolean) {
+        secureStorage.setCrashDetectionEnabled(enabled)
+        _uiState.update { it.copy(crashDetectionEnabled = enabled) }
     }
 
     fun sendSafeCheckIn() {
-        val myUid = auth.currentUser?.uid ?: return
-        val me = _uiState.value.members.find { it.uid == myUid }
+        val me = _uiState.value.members.find { it.uid == currentUserId }
         val senderName = me?.name ?: auth.currentUser?.displayName ?: "Ahli Keluarga"
         val address = me?.addressText ?: "lokasi terkini"
 
         viewModelScope.launch {
-            val res = locationRepository.sendSafeCheckIn(senderName, address)
-            res.fold(
+            locationRepository.sendSafeCheckIn(senderName, address).fold(
                 onSuccess = {
-                    _uiState.update {
-                        it.copy(statusMessage = "Status 'Saya Selamat' di $address telah dihantar!")
-                    }
+                    _uiState.update { it.copy(statusMessage = "Status 'Saya Selamat' di $address telah dihantar!") }
                 },
                 onFailure = { err ->
-                    _uiState.update {
-                        it.copy(statusMessage = "Gagal menghantar status: ${err.message}")
-                    }
+                    _uiState.update { it.copy(statusMessage = "Gagal menghantar status: ${err.message}") }
                 }
             )
         }
     }
 
-    fun triggerSos() {
-        val myUid = auth.currentUser?.uid ?: return
-        val me = _uiState.value.members.find { it.uid == myUid }
-        val senderName = me?.name ?: auth.currentUser?.displayName ?: "Ahli Keluarga"
+    fun triggerSos(customPrefix: String = "") {
+        val me = _uiState.value.members.find { it.uid == currentUserId }
+        val senderName = if (customPrefix.isNotBlank()) {
+            "$customPrefix (${me?.name ?: auth.currentUser?.displayName ?: "Ahli"})"
+        } else {
+            me?.name ?: auth.currentUser?.displayName ?: "Ahli Keluarga"
+        }
         val lat = me?.latitude ?: 0.0
         val lng = me?.longitude ?: 0.0
 
         viewModelScope.launch {
             _uiState.update { it.copy(isSendingSos = true) }
-            val res = locationRepository.sendSosAlert(senderName, lat, lng)
-            res.fold(
+            locationRepository.sendSosAlert(senderName, lat, lng).fold(
                 onSuccess = {
                     _uiState.update {
                         it.copy(
@@ -297,8 +448,8 @@ class MapViewModel(
     }
 
     fun addSafePlace(name: String, lat: Double, lng: Double, radiusMeters: Float, isPrivate: Boolean) {
-        val uid = auth.currentUser?.uid ?: return
-        if (name.isBlank()) return
+        val uid = currentUserId
+        if (uid.isBlank() || name.isBlank()) return
 
         if (isPrivate) {
             val currentPrivate = secureStorage.getPrivatePlaces().toMutableList()

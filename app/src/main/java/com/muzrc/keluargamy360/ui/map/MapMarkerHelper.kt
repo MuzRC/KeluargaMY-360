@@ -7,22 +7,28 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
+import com.muzrc.keluargamy360.data.model.HistoryPoint
 import com.muzrc.keluargamy360.data.model.SafePlace
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
+import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
 
 object MapMarkerHelper {
 
     private const val PLACES_SOURCE_ID = "keluargamy360-places-source"
     private const val PLACES_CIRCLE_LAYER_ID = "keluargamy360-places-circle"
+    private const val HISTORY_SOURCE_ID = "keluargamy360-history-source"
+    private const val HISTORY_LINE_LAYER_ID = "keluargamy360-history-line"
     private const val MEMBERS_SOURCE_ID = "keluargamy360-members-source"
     private const val MEMBERS_SYMBOL_LAYER_ID = "keluargamy360-members-symbol"
 
@@ -41,6 +47,20 @@ object MapMarkerHelper {
             style.addLayer(placeCircle)
         }
 
+        if (style.getSource(HISTORY_SOURCE_ID) == null) {
+            style.addSource(GeoJsonSource(HISTORY_SOURCE_ID))
+        }
+        if (style.getLayer(HISTORY_LINE_LAYER_ID) == null) {
+            val historyLine = LineLayer(HISTORY_LINE_LAYER_ID, HISTORY_SOURCE_ID).withProperties(
+                PropertyFactory.lineColor("#7B1FA2"),
+                PropertyFactory.lineWidth(5f),
+                PropertyFactory.lineOpacity(0.85f),
+                PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)
+            )
+            style.addLayer(historyLine)
+        }
+
         if (style.getSource(MEMBERS_SOURCE_ID) == null) {
             style.addSource(GeoJsonSource(MEMBERS_SOURCE_ID))
         }
@@ -53,6 +73,18 @@ object MapMarkerHelper {
             )
             style.addLayer(symbolLayer)
         }
+    }
+
+    fun updateHistoryRoute(map: MapLibreMap, points: List<HistoryPoint>) {
+        val style = map.style ?: return
+        val source = style.getSourceAs<GeoJsonSource>(HISTORY_SOURCE_ID) ?: return
+        if (points.size < 2) {
+            source.setGeoJson(FeatureCollection.fromFeatures(emptyList()))
+            return
+        }
+        val coords = points.map { Point.fromLngLat(it.longitude, it.latitude) }
+        val lineFeature = Feature.fromGeometry(LineString.fromLngLats(coords))
+        source.setGeoJson(FeatureCollection.fromFeatures(listOf(lineFeature)))
     }
 
     fun updateSafePlaces(map: MapLibreMap, places: List<SafePlace>) {

@@ -93,10 +93,11 @@ fun MapScreen(
         }
     }
 
-    LaunchedEffect(uiState.members, uiState.safePlaces, mapLibreMap) {
+    LaunchedEffect(uiState.members, uiState.safePlaces, uiState.activeHistoryRoute, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
         MapMarkerHelper.updateMembers(map, uiState.members)
         MapMarkerHelper.updateSafePlaces(map, uiState.safePlaces)
+        MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
 
     LaunchedEffect(uiState.selectedMember, mapLibreMap) {
@@ -192,7 +193,6 @@ fun MapScreen(
                 },
                 actions = {
                     TextButton(onClick = { showInviteDialog = true }) { Text("Kod Jemputan") }
-                    IconButton(onClick = onNavigateToPlaces) { Icon(Icons.Default.Place, "Zon Selamat") }
                     IconButton(onClick = onSignOut) { Icon(Icons.AutoMirrored.Filled.ExitToApp, "Log Keluar") }
                 }
             )
@@ -216,7 +216,20 @@ fun MapScreen(
                 }
             }
 
-            Box(modifier = Modifier.fillMaxWidth().weight(0.52f)) {
+            uiState.historyOwnerName?.let { ownerName ->
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Laluan 24 Jam: $ownerName", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        TextButton(onClick = { viewModel.clear24HourRoute() }) { Text("Tutup Laluan") }
+                    }
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().weight(0.55f)) {
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
@@ -225,6 +238,7 @@ fun MapScreen(
                                 mapLibreMap = map
                                 MapMarkerHelper.updateMembers(map, uiState.members)
                                 MapMarkerHelper.updateSafePlaces(map, uiState.safePlaces)
+                                MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
                             }
                         }
                     }
@@ -265,6 +279,7 @@ fun MapScreen(
                             mapLibreMap?.let {
                                 MapMarkerHelper.updateMembers(it, uiState.members)
                                 MapMarkerHelper.updateSafePlaces(it, uiState.safePlaces)
+                                MapMarkerHelper.updateHistoryRoute(it, uiState.activeHistoryRoute)
                             }
                         }
                     },
@@ -284,24 +299,17 @@ fun MapScreen(
             }
 
             Surface(
-                modifier = Modifier.fillMaxWidth().weight(0.48f),
+                modifier = Modifier.fillMaxWidth().weight(0.45f),
                 shadowElevation = 8.dp,
                 shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        FilledTonalButton(
-                            onClick = { viewModel.sendSafeCheckIn() },
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Saya Selamat")
-                        }
+                        Text("Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 text = if (uiState.isTrackingEnabled) "GPS Aktif" else "GPS Dijeda",
@@ -311,8 +319,6 @@ fun MapScreen(
                             Switch(checked = uiState.isTrackingEnabled, onCheckedChange = { viewModel.toggleTracking(it) })
                         }
                     }
-
-                    Text("Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
 
                     if (uiState.members.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
