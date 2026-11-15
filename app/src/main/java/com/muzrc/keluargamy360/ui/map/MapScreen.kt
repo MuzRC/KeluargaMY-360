@@ -53,11 +53,11 @@ fun MapScreen(
     var isDarkMap by remember { mutableStateOf(false) }
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
+    var hideBatteryBanner by remember { mutableStateOf(false) }
     var hasBatteryExemption by remember {
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
     }
 
-    // Simpan koordinat semasa setiap pin untuk animasi gelongsor lancar (smooth gliding)
     val renderedCoords = remember { mutableMapOf<String, Pair<Double, Double>>() }
     var activePinAnimator by remember { mutableStateOf<ValueAnimator?>(null) }
 
@@ -78,20 +78,7 @@ fun MapScreen(
         }
     }
 
-        LaunchedEffect(
-        uiState.selectedMember?.uid,
-        uiState.selectedMember?.latitude,
-        uiState.selectedMember?.longitude,
-        mapLibreMap
-    ) {
-        val map = mapLibreMap ?: return@LaunchedEffect
-        val target = uiState.selectedMember ?: return@LaunchedEffect
-        map.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 16.0),
-            1200
-        )
-    }
-Unit) {
+    LaunchedEffect(Unit) {
         val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
@@ -123,7 +110,6 @@ Unit) {
 
             val startSnapshot = targetMembers.associate { m ->
                 val prev = renderedCoords[m.uid]
-                // Jika titik baharu atau lompatan terlalu jauh (> ~5km), terus letak tanpa animasi jauh
                 if (prev == null || abs(prev.first - m.latitude) > 0.05 || abs(prev.second - m.longitude) > 0.05) {
                     m.uid to (m.latitude to m.longitude)
                 } else {
@@ -161,7 +147,19 @@ Unit) {
         MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
 
-    
+    LaunchedEffect(
+        uiState.selectedMember?.uid,
+        uiState.selectedMember?.latitude,
+        uiState.selectedMember?.longitude,
+        mapLibreMap
+    ) {
+        val map = mapLibreMap ?: return@LaunchedEffect
+        val target = uiState.selectedMember ?: return@LaunchedEffect
+        map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 16.0),
+            1200
+        )
+    }
 
     uiState.activeSosAlert?.let { alertMsg ->
         AlertDialog(
@@ -254,19 +252,34 @@ Unit) {
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            if (!hasBatteryExemption) {
+            if (!hideBatteryBanner) {
                 Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(Icons.Default.BatteryAlert, null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Matikan sekatan bateri supaya GPS kekal aktif.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        Text(
+                            text = "Aktifkan Auto-Lancar & Bateri supaya GPS tidak terhenti.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (!hasBatteryExemption) {
+                            TextButton(onClick = {
+                                context.startActivity(PermissionHelper.createBatteryOptimizationIntent(context))
+                                hasBatteryExemption = PermissionHelper.isIgnoringBatteryOptimizations(context)
+                            }) { Text("Bateri", fontWeight = FontWeight.Bold) }
+                        }
                         TextButton(onClick = {
-                            context.startActivity(PermissionHelper.createBatteryOptimizationIntent(context))
-                            hasBatteryExemption = PermissionHelper.isIgnoringBatteryOptimizations(context)
-                        }) { Text("Benarkan", fontWeight = FontWeight.Bold) }
+                            Toast.makeText(
+                                context,
+                                "Sila hidupkan 'Auto-lancar / Benarkan aktiviti latar belakang' untuk KeluargaMY360.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            PermissionHelper.openOemAutoStartSettings(context)
+                            hideBatteryBanner = true
+                        }) { Text("Auto-Lancar", fontWeight = FontWeight.Bold) }
                     }
                 }
             }
@@ -303,7 +316,10 @@ Unit) {
                     val observer = LifecycleEventObserver { _, event ->
                         when (event) {
                             Lifecycle.Event.ON_START -> mapView.onStart()
-                            Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                            Lifecycle.Event.ON_RESUME -> {
+                                mapView.onResume()
+                                hasBatteryExemption = PermissionHelper.isIgnoringBatteryOptimizations(context)
+                            }
                             Lifecycle.Event.ON_PAUSE -> mapView.onPause()
                             Lifecycle.Event.ON_STOP -> mapView.onStop()
                             Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
@@ -395,4 +411,3 @@ Unit) {
         }
     }
 }
-
