@@ -17,14 +17,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.ui.map.MapViewModel
+import org.json.JSONObject
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.offline.OfflineManager
+import org.maplibre.android.offline.OfflineRegion
 import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
-import org.json.JSONObject
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -147,14 +149,17 @@ fun PlacesScreen(viewModel: MapViewModel) {
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            // Kad Peta Luar Talian (Offline Map Cache)
             Card(
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp)
             ) {
                 Row(
-                    modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                    modifier = Modifier
+                        .padding(14.dp)
+                        .fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Default.CloudDownload, null, tint = MaterialTheme.colorScheme.primary)
@@ -185,8 +190,8 @@ fun PlacesScreen(viewModel: MapViewModel) {
                                 def,
                                 meta,
                                 object : OfflineManager.CreateOfflineRegionCallback {
-                                    override fun onCreate(region: org.maplibre.android.offline.OfflineRegion) {
-                                        region.setDownloadState(org.maplibre.android.offline.OfflineRegion.STATE_ACTIVE)
+                                    override fun onCreate(region: OfflineRegion) {
+                                        region.setDownloadState(OfflineRegion.STATE_ACTIVE)
                                         isDownloadingOffline = false
                                         offlineStatus = "Peta luar talian berjaya disimpan di telefon!"
                                         Toast.makeText(context, "Peta luar talian sedia digunakan!", Toast.LENGTH_SHORT).show()
@@ -208,10 +213,10 @@ fun PlacesScreen(viewModel: MapViewModel) {
             if (uiState.safePlaces.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = "Tiada zon selamat didaftarkan lagi.
-Tekan '+ Tambah Zon' untuk mula.",
+                        text = "Tiada zon selamat didaftarkan lagi.\nTekan '+ Tambah Zon' untuk mula.",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
                     )
                 }
             } else {
@@ -219,7 +224,9 @@ Tekan '+ Tambah Zon' untuk mula.",
                     items(uiState.safePlaces, key = { "${it.isPrivate}_${it.placeId}" }) { place ->
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
