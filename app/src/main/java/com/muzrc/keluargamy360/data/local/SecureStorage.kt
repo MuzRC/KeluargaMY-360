@@ -39,6 +39,30 @@ class SecureStorage(context: Context) {
 
     fun isTrackingEnabled(): Boolean = prefs.getBoolean(KEY_TRACKING_ENABLED, true)
 
+    fun setLowBatteryAlertEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_LOW_BATTERY_ALERT, enabled).apply()
+    }
+
+    fun isLowBatteryAlertEnabled(): Boolean = prefs.getBoolean(KEY_LOW_BATTERY_ALERT, true)
+
+    fun setSpeedAlertEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SPEED_ALERT_ENABLED, enabled).apply()
+    }
+
+    fun isSpeedAlertEnabled(): Boolean = prefs.getBoolean(KEY_SPEED_ALERT_ENABLED, true)
+
+    fun setSpeedLimitKmh(limit: Float) {
+        prefs.edit().putFloat(KEY_SPEED_LIMIT_KMH, limit).apply()
+    }
+
+    fun getSpeedLimitKmh(): Float = prefs.getFloat(KEY_SPEED_LIMIT_KMH, 110f)
+
+    fun setCrashDetectionEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CRASH_DETECTION, enabled).apply()
+    }
+
+    fun isCrashDetectionEnabled(): Boolean = prefs.getBoolean(KEY_CRASH_DETECTION, true)
+
     fun savePrivatePlaces(places: List<SafePlace>) {
         val array = JSONArray()
         places.forEach { p ->
@@ -88,6 +112,10 @@ class SecureStorage(context: Context) {
         private const val KEY_FAMILY_ID = "family_id"
         private const val KEY_FAMILY_MASTER_KEY = "family_master_key"
         private const val KEY_TRACKING_ENABLED = "tracking_enabled"
+        private const val KEY_LOW_BATTERY_ALERT = "low_battery_alert"
+        private const val KEY_SPEED_ALERT_ENABLED = "speed_alert_enabled"
+        private const val KEY_SPEED_LIMIT_KMH = "speed_limit_kmh"
+        private const val KEY_CRASH_DETECTION = "crash_detection_enabled"
         private const val KEY_PRIVATE_PLACES = "private_safe_places"
     }
 }
