@@ -29,6 +29,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.PermissionHelper
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -81,12 +82,15 @@ fun MapScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val secureStorage = remember { SecureStorage(context) }
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var mapStyleMode by remember { mutableIntStateOf(0) }
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
-    var hideBatteryBanner by remember { mutableStateOf(false) }
+    var hideBatteryBanner by remember {
+        mutableStateOf(secureStorage.isAutoStartConfigured())
+    }
     var hasBatteryExemption by remember {
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
     }
@@ -287,7 +291,7 @@ fun MapScreen(
             if (!hideBatteryBanner) {
                 Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(Icons.Default.BatteryAlert, null)
@@ -310,8 +314,15 @@ fun MapScreen(
                                 Toast.LENGTH_LONG
                             ).show()
                             PermissionHelper.openOemAutoStartSettings(context)
+                            secureStorage.setAutoStartConfigured(true)
                             hideBatteryBanner = true
                         }) { Text("Auto-Lancar", fontWeight = FontWeight.Bold) }
+                        IconButton(onClick = {
+                            secureStorage.setAutoStartConfigured(true)
+                            hideBatteryBanner = true
+                        }) {
+                            Icon(Icons.Default.Close, "Tutup", modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }
