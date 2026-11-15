@@ -39,6 +39,12 @@ class SecureStorage(context: Context) {
 
     fun isTrackingEnabled(): Boolean = prefs.getBoolean(KEY_TRACKING_ENABLED, true)
 
+    fun setAutoStartConfigured(configured: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_START_CONFIGURED, configured).apply()
+    }
+
+    fun isAutoStartConfigured(): Boolean = prefs.getBoolean(KEY_AUTO_START_CONFIGURED, false)
+
     fun setLowBatteryAlertEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_LOW_BATTERY_ALERT, enabled).apply()
     }
@@ -102,7 +108,9 @@ class SecureStorage(context: Context) {
 
     fun clearSession() {
         val savedPrivate = prefs.getString(KEY_PRIVATE_PLACES, null)
+        val savedAutoStart = prefs.getBoolean(KEY_AUTO_START_CONFIGURED, false)
         prefs.edit().clear().apply()
+        prefs.edit().putBoolean(KEY_AUTO_START_CONFIGURED, savedAutoStart).apply()
         if (savedPrivate != null) {
             prefs.edit().putString(KEY_PRIVATE_PLACES, savedPrivate).apply()
         }
@@ -112,6 +120,7 @@ class SecureStorage(context: Context) {
         private const val KEY_FAMILY_ID = "family_id"
         private const val KEY_FAMILY_MASTER_KEY = "family_master_key"
         private const val KEY_TRACKING_ENABLED = "tracking_enabled"
+        private const val KEY_AUTO_START_CONFIGURED = "auto_start_configured"
         private const val KEY_LOW_BATTERY_ALERT = "low_battery_alert"
         private const val KEY_SPEED_ALERT_ENABLED = "speed_alert_enabled"
         private const val KEY_SPEED_LIMIT_KMH = "speed_limit_kmh"
