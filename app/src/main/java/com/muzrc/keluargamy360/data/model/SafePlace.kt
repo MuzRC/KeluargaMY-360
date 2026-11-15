@@ -6,5 +6,6 @@ data class SafePlace(
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
     val radiusMeters: Float = 150f,
-    val createdBy: String = ""
+    val createdBy: String = "",
+    val isPrivate: Boolean = false
 )
