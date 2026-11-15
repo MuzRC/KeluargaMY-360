@@ -14,11 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.MyLocation
-import androidx.compose.material.icons.filled.Place
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,7 +27,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.PermissionHelper
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -39,13 +34,6 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
-import org.maplibre.android.style.layers.CircleLayer
-import org.maplibre.android.style.layers.PropertyFactory
-import org.maplibre.android.style.layers.SymbolLayer
-import org.maplibre.android.style.sources.GeoJsonSource
-import org.maplibre.geojson.Feature
-import org.maplibre.geojson.FeatureCollection
-import org.maplibre.geojson.Point
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,130 +47,108 @@ fun MapScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
-    var showSosConfirmDialog by remember { mutableStateOf(false) }
+    var isDarkMap by remember { mutableStateOf(false) }
+    var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     var hasBatteryExemption by remember {
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
     }
 
-    // Minta kebenaran lokasi & notifikasi apabila skrin dibuka
-    val backgroundPermissionLauncher = rememberLauncherForActivityResult(
+    val bgPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) {
-        LocationTrackingService.start(context)
-    }
+    ) { if (uiState.isTrackingEnabled) LocationTrackingService.start(context) }
 
-    val foregroundPermissionLauncher = rememberLauncherForActivityResult(
+    val fgPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
-        if (fineGranted) {
-            LocationTrackingService.start(context)
+    ) { perms ->
+        if (perms[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
+            if (uiState.isTrackingEnabled) LocationTrackingService.start(context)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 !PermissionHelper.hasBackgroundLocation(context)
             ) {
-                backgroundPermissionLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                bgPermLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
             }
         }
     }
 
     LaunchedEffect(Unit) {
-        val permsToRequest = mutableListOf(
+        val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-
         if (PermissionHelper.hasFineLocation(context)) {
-            LocationTrackingService.start(context)
+            if (uiState.isTrackingEnabled) LocationTrackingService.start(context)
         } else {
-            foregroundPermissionLauncher.launch(permsToRequest.toTypedArray())
+            fgPermLauncher.launch(perms.toTypedArray())
         }
     }
 
     LaunchedEffect(uiState.statusMessage) {
-        uiState.statusMessage?.let { msg ->
-            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+        uiState.statusMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
             viewModel.clearStatusMessage()
         }
     }
 
-    // Kemas kini pin ahli keluarga pada peta setiap kali koordinat berubah
-    LaunchedEffect(uiState.members, mapLibreMap) {
+    LaunchedEffect(uiState.members, uiState.safePlaces, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
-        updateMembersOnMap(map, uiState.members)
+        MapMarkerHelper.updateMembers(map, uiState.members)
+        MapMarkerHelper.updateSafePlaces(map, uiState.safePlaces)
     }
 
-    // Gerakkan kamera peta kepada ahli yang dipilih
     LaunchedEffect(uiState.selectedMember, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
         val target = uiState.selectedMember ?: return@LaunchedEffect
         map.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(
-                LatLng(target.latitude, target.longitude),
-                15.0
-            )
+            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 15.5)
         )
     }
 
-    // Dialog Amaran SOS dari ahli lain
     uiState.activeSosAlert?.let { alertMsg ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissSosAlert() },
-            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) },
+            icon = { Icon(Icons.Default.Warning, null, tint = Color.Red) },
             title = { Text("AMARAN KECEMASAN SOS!", fontWeight = FontWeight.Bold, color = Color.Red) },
             text = { Text(alertMsg) },
             confirmButton = {
                 Button(
                     onClick = { viewModel.dismissSosAlert() },
                     colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-                ) {
-                    Text("Difahami")
-                }
+                ) { Text("Difahami") }
             }
         )
     }
 
-    // Dialog Pengesahan Hantar SOS
-    if (showSosConfirmDialog) {
+    if (showSosDialog) {
         AlertDialog(
-            onDismissRequest = { showSosConfirmDialog = false },
-            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red) },
+            onDismissRequest = { showSosDialog = false },
+            icon = { Icon(Icons.Default.Warning, null, tint = Color.Red) },
             title = { Text("Hantar Isyarat Kecemasan SOS?") },
-            text = {
-                Text("Amaran kecemasan berserta lokasi masa nyata anda akan dihantar serta-merta kepada semua ahli keluarga.")
-            },
+            text = { Text("Amaran kecemasan berserta lokasi masa nyata anda akan dihantar kepada semua ahli keluarga.") },
             confirmButton = {
                 Button(
-                    onClick = {
-                        showSosConfirmDialog = false
-                        viewModel.triggerSos()
-                    },
+                    onClick = { showSosDialog = false; viewModel.triggerSos() },
                     colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-                ) {
-                    Text("HANTAR SOS SEKARANG")
-                }
+                ) { Text("HANTAR SOS SEKARANG") }
             },
             dismissButton = {
-                TextButton(onClick = { showSosConfirmDialog = false }) {
-                    Text("Batal")
-                }
+                TextButton(onClick = { showSosDialog = false }) { Text("Batal") }
             }
         )
     }
 
-    // Dialog Kod Jemputan Keluarga
     if (showInviteDialog) {
         val code = uiState.familyGroup?.inviteCode ?: "-"
         AlertDialog(
             onDismissRequest = { showInviteDialog = false },
-            title = { Text(uiState.familyGroup?.familyName ?: "Kod Jemputan Keluarga") },
+            title = { Text(uiState.familyGroup?.familyName ?: "Kod Jemputan") },
             text = {
                 Column {
-                    Text("Kongsi kod ini bersama PIN Keselamatan 6-digit anda kepada ahli keluarga untuk menyertai kumpulan:")
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Kongsi kod ini bersama PIN 6-digit kepada ahli keluarga:")
+                    Spacer(Modifier.height(12.dp))
                     Surface(
                         color = MaterialTheme.colorScheme.primaryContainer,
                         shape = RoundedCornerShape(12.dp),
@@ -193,28 +159,17 @@ fun MapScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
-                                text = code,
-                                style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Text(code, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                             IconButton(onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Kod KeluargaMY360", code))
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("Kod KeluargaMY360", code))
                                 Toast.makeText(context, "Kod jemputan disalin!", Toast.LENGTH_SHORT).show()
-                            }) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Salin Kod")
-                            }
+                            }) { Icon(Icons.Default.ContentCopy, "Salin") }
                         }
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = { showInviteDialog = false }) {
-                    Text("Tutup")
-                }
-            }
+            confirmButton = { TextButton(onClick = { showInviteDialog = false }) { Text("Tutup") } }
         )
     }
 
@@ -236,70 +191,40 @@ fun MapScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = { showInviteDialog = true }) {
-                        Text("Kod Jemputan", fontWeight = FontWeight.SemiBold)
-                    }
-                    IconButton(onClick = onNavigateToPlaces) {
-                        Icon(Icons.Default.Place, contentDescription = "Zon Selamat")
-                    }
-                    IconButton(onClick = onSignOut) {
-                        Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Log Keluar")
-                    }
+                    TextButton(onClick = { showInviteDialog = true }) { Text("Kod Jemputan") }
+                    IconButton(onClick = onNavigateToPlaces) { Icon(Icons.Default.Place, "Zon Selamat") }
+                    IconButton(onClick = onSignOut) { Icon(Icons.AutoMirrored.Filled.ExitToApp, "Log Keluar") }
                 }
             )
         }
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            // Peringatan jika jimat bateri menyekat GPS latar belakang
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             if (!hasBatteryExemption) {
-                Surface(
-                    color = MaterialTheme.colorScheme.tertiaryContainer,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.BatteryAlert,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onTertiaryContainer
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Matikan sekatan bateri supaya GPS tidak terhenti.",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Icon(Icons.Default.BatteryAlert, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Matikan sekatan bateri supaya GPS kekal aktif.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                         TextButton(onClick = {
                             context.startActivity(PermissionHelper.createBatteryOptimizationIntent(context))
                             hasBatteryExemption = PermissionHelper.isIgnoringBatteryOptimizations(context)
-                        }) {
-                            Text("Benarkan", fontWeight = FontWeight.Bold)
-                        }
+                        }) { Text("Benarkan", fontWeight = FontWeight.Bold) }
                     }
                 }
             }
 
-            // Bahagian Atas: Peta Interaktif MapLibre (OpenFreeMap - 100% Percuma)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(0.55f)
-            ) {
+            Box(modifier = Modifier.fillMaxWidth().weight(0.52f)) {
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
-                            map.setStyle(
-                                Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")
-                            ) { style ->
-                                setupMemberMapLayers(style)
+                            map.setStyle(Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")) { style ->
+                                MapMarkerHelper.setupLayers(style)
                                 mapLibreMap = map
-                                updateMembersOnMap(map, uiState.members)
+                                MapMarkerHelper.updateMembers(map, uiState.members)
+                                MapMarkerHelper.updateSafePlaces(map, uiState.safePlaces)
                             }
                         }
                     }
@@ -317,80 +242,84 @@ fun MapScreen(
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
-                    onDispose {
-                        lifecycleOwner.lifecycle.removeObserver(observer)
-                    }
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
-                AndroidView(
-                    factory = { mapView },
-                    modifier = Modifier.fillMaxSize()
-                )
+                AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
 
-                // Butang Kecemasan SOS (Bawah Kiri Peta)
                 ExtendedFloatingActionButton(
-                    onClick = { showSosConfirmDialog = true },
+                    onClick = { showSosDialog = true },
                     containerColor = Color(0xFFD32F2F),
                     contentColor = Color.White,
-                    icon = { Icon(Icons.Default.Warning, contentDescription = "SOS") },
+                    icon = { Icon(Icons.Default.Warning, "SOS") },
                     text = { Text("SOS", fontWeight = FontWeight.Bold) },
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(16.dp)
+                    modifier = Modifier.align(Alignment.TopStart).padding(14.dp)
                 )
 
-                // Butang Fokus Semula Kamera (Bawah Kanan Peta)
                 SmallFloatingActionButton(
                     onClick = {
-                        uiState.selectedMember?.let { target ->
-                            mapLibreMap?.animateCamera(
-                                CameraUpdateFactory.newLatLngZoom(
-                                    LatLng(target.latitude, target.longitude),
-                                    15.5
-                                )
-                            )
+                        isDarkMap = !isDarkMap
+                        val url = if (isDarkMap) "https://tiles.openfreemap.org/styles/dark" else "https://tiles.openfreemap.org/styles/liberty"
+                        mapLibreMap?.setStyle(Style.Builder().fromUri(url)) { style ->
+                            MapMarkerHelper.setupLayers(style)
+                            mapLibreMap?.let {
+                                MapMarkerHelper.updateMembers(it, uiState.members)
+                                MapMarkerHelper.updateSafePlaces(it, uiState.safePlaces)
+                            }
                         }
                     },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp)
+                    modifier = Modifier.align(Alignment.TopEnd).padding(14.dp)
                 ) {
-                    Icon(Icons.Default.MyLocation, contentDescription = "Fokus Lokasi")
+                    Icon(if (isDarkMap) Icons.Default.LightMode else Icons.Default.DarkMode, "Tema Peta")
                 }
+
+                SmallFloatingActionButton(
+                    onClick = {
+                        uiState.selectedMember?.let {
+                            mapLibreMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(it.latitude, it.longitude), 16.0))
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp)
+                ) { Icon(Icons.Default.MyLocation, "Fokus") }
             }
 
-            // Bahagian Bawah: Senarai Kad Ahli Keluarga
             Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(0.45f),
+                modifier = Modifier.fillMaxWidth().weight(0.48f),
                 shadowElevation = 8.dp,
                 shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Ahli Keluarga",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 10.dp)
-                    )
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        FilledTonalButton(
+                            onClick = { viewModel.sendSafeCheckIn() },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Saya Selamat")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (uiState.isTrackingEnabled) "GPS Aktif" else "GPS Dijeda",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Switch(checked = uiState.isTrackingEnabled, onCheckedChange = { viewModel.toggleTracking(it) })
+                        }
+                    }
+
+                    Text("Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
 
                     if (uiState.members.isEmpty()) {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Menunggu isyarat GPS pertama daripada ahli keluarga...",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Menunggu isyarat GPS pertama...", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
-                        LazyColumn(
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
                             items(uiState.members, key = { it.uid }) { member ->
                                 MemberCard(
                                     member = member,
@@ -404,46 +333,4 @@ fun MapScreen(
             }
         }
     }
-}
-
-private const val MEMBERS_SOURCE_ID = "keluargamy360-members-source"
-private const val MEMBERS_CIRCLE_LAYER_ID = "keluargamy360-members-circle"
-private const val MEMBERS_LABEL_LAYER_ID = "keluargamy360-members-label"
-
-private fun setupMemberMapLayers(style: Style) {
-    if (style.getSource(MEMBERS_SOURCE_ID) == null) {
-        style.addSource(GeoJsonSource(MEMBERS_SOURCE_ID))
-    }
-    if (style.getLayer(MEMBERS_CIRCLE_LAYER_ID) == null) {
-        val circleLayer = CircleLayer(MEMBERS_CIRCLE_LAYER_ID, MEMBERS_SOURCE_ID).withProperties(
-            PropertyFactory.circleRadius(12f),
-            PropertyFactory.circleColor("#1565C0"),
-            PropertyFactory.circleStrokeWidth(3f),
-            PropertyFactory.circleStrokeColor("#FFFFFF")
-        )
-        style.addLayer(circleLayer)
-    }
-    if (style.getLayer(MEMBERS_LABEL_LAYER_ID) == null) {
-        val symbolLayer = SymbolLayer(MEMBERS_LABEL_LAYER_ID, MEMBERS_SOURCE_ID).withProperties(
-            PropertyFactory.textField("{name}"),
-            PropertyFactory.textSize(13f),
-            PropertyFactory.textOffset(arrayOf(0f, -1.8f)),
-            PropertyFactory.textColor("#0D47A1"),
-            PropertyFactory.textHaloColor("#FFFFFF"),
-            PropertyFactory.textHaloWidth(2f)
-        )
-        style.addLayer(symbolLayer)
-    }
-}
-
-private fun updateMembersOnMap(map: MapLibreMap, members: List<DecryptedMemberLocation>) {
-    val style = map.style ?: return
-    val source = style.getSourceAs<GeoJsonSource>(MEMBERS_SOURCE_ID) ?: return
-
-    val features = members.map { m ->
-        Feature.fromGeometry(Point.fromLngLat(m.longitude, m.latitude)).apply {
-            addStringProperty("name", "${m.name} (${m.batteryLevel}%)")
-        }
-    }
-    source.setGeoJson(FeatureCollection.fromFeatures(features))
 }
