@@ -90,7 +90,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                         serviceScope.launch {
                             locationRepository.postFamilyAlert(
                                 type = "BATTERY",
-                                message = "Amaran Bateri: Bateri telefon $userName tinggal${battery.level}%!"
+                                message = "Amaran Bateri: Bateri telefon $userName tinggal ${battery.level}%!"
                             )
                         }
                     }
@@ -106,7 +106,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                         serviceScope.launch {
                             locationRepository.postFamilyAlert(
                                 type = "SPEED",
-                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had:${speedLimit.roundToInt()} km/j)."
+                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had: ${speedLimit.roundToInt()} km/j)."
                             )
                         }
                     }
