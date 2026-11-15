@@ -90,7 +90,6 @@ class MapViewModel(
             }
         }
 
-        // 1. Dengar lokasi tersulit semua ahli secara masa nyata
         locationsListener?.remove()
         locationsListener = db.collection("families").document(familyId)
             .collection("locations")
@@ -148,18 +147,19 @@ class MapViewModel(
                 }
             }
 
-        // 2. Dengar senarai Zon Selamat (Geofence)
         placesListener?.remove()
         placesListener = db.collection("families").document(familyId)
             .collection("places")
             .addSnapshotListener { snapshot, _ ->
                 if (snapshot == null) return@addSnapshotListener
-                val places = snapshot.documents.mapNotNull { it.toObject(SafePlace::class.java) }
-                _uiState.update { it.copy(safePlaces = places) }
-                registerSystemGeofences(places)
+                val familyPlaces = snapshot.documents.mapNotNull {
+                    it.toObject(SafePlace::class.java)?.copy(isPrivate = false)
+                }
+                val combinedPlaces = familyPlaces + secureStorage.getPrivatePlaces()
+                _uiState.update { it.copy(safePlaces = combinedPlaces) }
+                registerSystemGeofences(combinedPlaces)
             }
 
-        // 3. Dengar amaran kecemasan SOS & daftar masuk selamat daripada ahli lain
         alertsListener?.remove()
         alertsListener = db.collection("families").document(familyId)
             .collection("alerts")
@@ -296,11 +296,36 @@ class MapViewModel(
         }
     }
 
-    fun addSafePlace(name: String, lat: Double, lng: Double, radiusMeters: Float) {
-        val familyId = secureStorage.getFamilyId() ?: return
+    fun addSafePlace(name: String, lat: Double, lng: Double, radiusMeters: Float, isPrivate: Boolean) {
         val uid = auth.currentUser?.uid ?: return
         if (name.isBlank()) return
 
+        if (isPrivate) {
+            val currentPrivate = secureStorage.getPrivatePlaces().toMutableList()
+            val newPlace = SafePlace(
+                placeId = "priv_${System.currentTimeMillis()}",
+                name = name.trim(),
+                latitude = lat,
+                longitude = lng,
+                radiusMeters = radiusMeters,
+                createdBy = uid,
+                isPrivate = true
+            )
+            currentPrivate.add(newPlace)
+            secureStorage.savePrivatePlaces(currentPrivate)
+
+            val combined = _uiState.value.safePlaces.filter { !it.isPrivate } + currentPrivate
+            _uiState.update {
+                it.copy(
+                    safePlaces = combined,
+                    statusMessage = "Zon peribadi '${newPlace.name}' disimpan di telefon."
+                )
+            }
+            registerSystemGeofences(combined)
+            return
+        }
+
+        val familyId = secureStorage.getFamilyId() ?: return
         viewModelScope.launch {
             try {
                 val docRef = db.collection("families").document(familyId).collection("places").document()
@@ -310,22 +335,32 @@ class MapViewModel(
                     latitude = lat,
                     longitude = lng,
                     radiusMeters = radiusMeters,
-                    createdBy = uid
+                    createdBy = uid,
+                    isPrivate = false
                 )
                 docRef.set(place).await()
-                _uiState.update { it.copy(statusMessage = "Zon selamat '${place.name}' berjaya ditambah.") }
+                _uiState.update { it.copy(statusMessage = "Zon keluarga '${place.name}' berjaya dikongsi.") }
             } catch (e: Exception) {
                 _uiState.update { it.copy(statusMessage = "Gagal menambah zon: ${e.message}") }
             }
         }
     }
 
-    fun deleteSafePlace(placeId: String) {
+    fun deleteSafePlace(place: SafePlace) {
+        if (place.isPrivate) {
+            val updatedPrivate = secureStorage.getPrivatePlaces().filter { it.placeId != place.placeId }
+            secureStorage.savePrivatePlaces(updatedPrivate)
+            val combined = _uiState.value.safePlaces.filter { !it.isPrivate } + updatedPrivate
+            _uiState.update { it.copy(safePlaces = combined) }
+            registerSystemGeofences(combined)
+            return
+        }
+
         val familyId = secureStorage.getFamilyId() ?: return
         viewModelScope.launch {
             try {
                 db.collection("families").document(familyId)
-                    .collection("places").document(placeId)
+                    .collection("places").document(place.placeId)
                     .delete()
                     .await()
             } catch (_: Exception) {
