@@ -13,7 +13,8 @@ import kotlinx.coroutines.launch
 data class FamilyUiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
-    val joinedFamily: FamilyGroup? = null
+    val joinedFamily: FamilyGroup? = null,
+    val existingFamily: FamilyGroup? = null
 )
 
 class FamilyViewModel(
@@ -22,6 +23,32 @@ class FamilyViewModel(
 
     private val _uiState = MutableStateFlow(FamilyUiState())
     val uiState: StateFlow<FamilyUiState> = _uiState.asStateFlow()
+
+    fun loadExistingFamily(familyId: String) {
+        viewModelScope.launch {
+            val group = repository.getFamilyGroup(familyId)
+            _uiState.update { it.copy(existingFamily = group) }
+        }
+    }
+
+    fun unlockExistingFamily(familyId: String, pin: String) {
+        if (pin.length != 6 || !pin.all { it.isDigit() }) {
+            _uiState.update { it.copy(errorMessage = "PIN Keselamatan mesti tepat 6 digit nombor.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            repository.unlockFamilyWithPin(familyId, pin).fold(
+                onSuccess = { group ->
+                    _uiState.update { it.copy(isLoading = false, joinedFamily = group) }
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = err.message) }
+                }
+            )
+        }
+    }
 
     fun createFamily(familyName: String, pin: String) {
         when {
