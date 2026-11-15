@@ -53,10 +53,6 @@ object PermissionHelper {
         }
     }
 
-    /**
-     * Membuka menu Auto-Launch / Aktiviti Latar Belakang mengikut jenama telefon.
-     * Jika tidak disokong oleh ROM tersebut, ia terus membuka halaman Info Aplikasi Android.
-     */
     fun openOemAutoStartSettings(context: Context) {
         val manufacturer = Build.MANUFACTURER.lowercase()
         val brand = Build.BRAND.lowercase()
@@ -198,7 +194,6 @@ object PermissionHelper {
             }
         }
 
-        // Fallback: Buka terus halaman Info Aplikasi KeluargaMY360 (Penggunaan Bateri -> Benarkan Aktiviti Latar Belakang)
         try {
             val appDetailsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                 data = Uri.parse("package:${context.packageName}")
