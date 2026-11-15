@@ -1,6 +1,6 @@
 {
-  "latestVersion": "1.0.1",
-  "versionCode": 1,
-  "releaseNotes": "Keluaran pertama KeluargaMY360.",
-  "downloadUrl": "https://github.com/MuzRC/KeluargaMY-360/releases/latest"
+  "latestVersion": "1.0.48",
+  "versionCode": 48,
+  "releaseNotes": "Create app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml",
+  "downloadUrl": "https://github.com/MuzRC/KeluargaMY-360/releases/download/v1.0.48/KeluargaMY360-v1.0.48-signed.apk"
 }
