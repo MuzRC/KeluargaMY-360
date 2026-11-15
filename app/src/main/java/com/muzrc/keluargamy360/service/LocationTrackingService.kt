@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.location.Location
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
@@ -30,6 +31,10 @@ class LocationTrackingService : Service() {
     private lateinit var locationCallback: LocationCallback
     private lateinit var locationRepository: LocationRepository
 
+    private var lastUploadedLocation: Location? = null
+    private var lastUploadTimeMs: Long = 0L
+    private var isLowBatteryMode: Boolean = false
+
     override fun onCreate() {
         super.onCreate()
         val secureStorage = SecureStorage(this)
@@ -39,8 +44,30 @@ class LocationTrackingService : Service() {
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val loc = result.lastLocation ?: return
-                val speedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
+                val now = System.currentTimeMillis()
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
+
+                // 1. Tukar profil kuasa secara automatik jika bateri bawah 20% & tidak dicas
+                val shouldUseLowBatteryMode = battery.level < 20 && !battery.isCharging
+                if (shouldUseLowBatteryMode != isLowBatteryMode) {
+                    isLowBatteryMode = shouldUseLowBatteryMode
+                    restartLocationUpdates()
+                }
+
+                // 2. Tapis muat naik: hanya hantar jika bergerak >= 30m atau cukup 5 minit (heartbeat)
+                val prevLoc = lastUploadedLocation
+                val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
+                val elapsedSinceLastUpload = now - lastUploadTimeMs
+
+                val shouldUpload = prevLoc == null ||
+                        movedDistance >= MIN_DISPLACEMENT_METERS ||
+                        elapsedSinceLastUpload >= HEARTBEAT_INTERVAL_MS
+
+                if (!shouldUpload) return
+
+                lastUploadedLocation = loc
+                lastUploadTimeMs = now
+                val speedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
 
                 serviceScope.launch {
                     locationRepository.uploadEncryptedLocation(
@@ -57,6 +84,8 @@ class LocationTrackingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
+        val battery = BatteryHelper.getBatteryStatus(this)
+        isLowBatteryMode = battery.level < 20 && !battery.isCharging
         startLocationUpdates()
         return START_STICKY
     }
@@ -65,9 +94,12 @@ class LocationTrackingService : Service() {
     private fun startLocationUpdates() {
         if (!PermissionHelper.hasFineLocation(this)) return
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 20_000L)
-            .setMinUpdateIntervalMillis(10_000L)
-            .setMinUpdateDistanceMeters(10f)
+        val intervalMs = if (isLowBatteryMode) LOW_BATTERY_INTERVAL_MS else NORMAL_INTERVAL_MS
+        val minDistance = if (isLowBatteryMode) 50f else MIN_DISPLACEMENT_METERS
+
+        val request = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, intervalMs)
+            .setMinUpdateIntervalMillis(intervalMs / 2)
+            .setMinUpdateDistanceMeters(minDistance)
             .build()
 
         fusedLocationClient.requestLocationUpdates(
@@ -75,6 +107,11 @@ class LocationTrackingService : Service() {
             locationCallback,
             Looper.getMainLooper()
         )
+    }
+
+    private fun restartLocationUpdates() {
+        fusedLocationClient.removeLocationUpdates(locationCallback)
+        startLocationUpdates()
     }
 
     private fun buildNotification(): Notification {
@@ -106,6 +143,10 @@ class LocationTrackingService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
+        private const val NORMAL_INTERVAL_MS = 60_000L          // 1 minit semasa biasa
+        private const val LOW_BATTERY_INTERVAL_MS = 180_000L    // 3 minit jika bateri < 20%
+        private const val HEARTBEAT_INTERVAL_MS = 300_000L      // 5 minit jika duduk pegun
+        private const val MIN_DISPLACEMENT_METERS = 30f
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java)
