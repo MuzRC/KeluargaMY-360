@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">KeluargaMY360</string>
+
+    <!-- Saluran Notifikasi -->
+    <string name="channel_tracking_name">Perkongsian Lokasi Masa Nyata</string>
+    <string name="channel_tracking_desc">Menunjukkan status perkongsian GPS aktif bersama ahli keluarga.</string>
+    <string name="channel_sos_name">Amaran Kecemasan SOS &amp; Zon</string>
+    <string name="channel_sos_desc">Notifikasi keutamaan tinggi untuk amaran kecemasan keluarga.</string>
+
+    <!-- Teks Notifikasi Kekal -->
+    <string name="notif_tracking_title">KeluargaMY360 Aktif</string>
+    <string name="notif_tracking_body">Lokasi masa nyata anda sedang dikongsi secara tersulit dengan keluarga.</string>
+</resources>
