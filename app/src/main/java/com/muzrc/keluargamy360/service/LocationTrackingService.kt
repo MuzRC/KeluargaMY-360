@@ -29,10 +29,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 class LocationTrackingService : Service(), SensorEventListener {
+
+    private enum class PowerProfile {
+        ACTIVE_MOVING,   // Sedang bergerak: GPS Satelit 15s
+        STATIONARY_IDLE, // Pegun > 2 minit: Jimat bateri 90s (tiada satelit)
+        LOW_BATTERY      // Bateri < 20%: Jimat kritikal 180s
+    }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var secureStorage: SecureStorage
@@ -47,8 +54,9 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastUploadedLocation: Location? = null
     private var lastHistoryLocation: Location? = null
     private var lastUploadTimeMs: Long = 0L
+    private var lastMovementTimeMs: Long = System.currentTimeMillis()
     private var lastSpeedKmh: Float = 0f
-    private var isLowBatteryMode: Boolean = false
+    private var currentProfile: PowerProfile = PowerProfile.ACTIVE_MOVING
 
     private var sentLowBatteryAlert = false
     private var lastSpeedAlertTimeMs: Long = 0L
@@ -73,20 +81,43 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
                 val elapsedSec = ((now - lastUploadTimeMs) / 1000f).coerceAtLeast(1f)
 
-                val gpsSpeedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
-                val calculatedSpeedKmh = if (prevLoc != null && movedDistance >= 10f) {
+                // 1. Tapis GPS Drift: isyarat mesti tepat (accuracy <= 35m) & jarak lebih besar daripada ralat GPS
+                val isAccurateFix = !loc.hasAccuracy() || loc.accuracy <= 35f
+                val driftThreshold = if (loc.hasAccuracy()) {
+                    max(MIN_DISPLACEMENT_METERS, loc.accuracy * 1.3f)
+                } else {
+                    MIN_DISPLACEMENT_METERS
+                }
+
+                val gpsSpeedKmh = if (loc.hasSpeed()) (loc.speed * 3.6f).coerceAtLeast(0f) else 0f
+                val hasRealGpsSpeed = isAccurateFix && gpsSpeedKmh >= 5f
+                val hasRealDisplacement = prevLoc != null && isAccurateFix && movedDistance >= driftThreshold
+
+                val isMovingNow = prevLoc == null || hasRealGpsSpeed || hasRealDisplacement
+                if (isMovingNow) {
+                    lastMovementTimeMs = now
+                }
+
+                // 2. Kira kelajuan hanya jika pergerakan sahih (elak 9 km/j palsu dalam rumah)
+                val calculatedSpeedKmh = if (prevLoc != null && isAccurateFix && movedDistance >= max(35f, driftThreshold)) {
                     (movedDistance / elapsedSec) * 3.6f
                 } else {
                     0f
                 }
-                val speedKmh = if (gpsSpeedKmh > 1f) gpsSpeedKmh else calculatedSpeedKmh
+                val speedKmh = when {
+                    !isMovingNow -> 0f
+                    hasRealGpsSpeed -> gpsSpeedKmh
+                    else -> calculatedSpeedKmh
+                }
                 lastSpeedKmh = speedKmh
 
                 val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
 
+                // 3. Sensor kemalangan hanya aktif bila memandu >= 25 km/j
                 val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
                 updateCrashSensorState(shouldMonitorCrash)
 
+                // 4. Amaran Bateri Lemah (< 15%)
                 if (secureStorage.isLowBatteryAlertEnabled() && battery.level < 15 && !battery.isCharging) {
                     if (!sentLowBatteryAlert) {
                         sentLowBatteryAlert = true
@@ -101,6 +132,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                     sentLowBatteryAlert = false
                 }
 
+                // 5. Amaran Had Laju
                 val speedLimit = secureStorage.getSpeedLimitKmh()
                 if (secureStorage.isSpeedAlertEnabled() && speedKmh > speedLimit) {
                     if (now - lastSpeedAlertTimeMs > 600_000L) {
@@ -114,37 +146,50 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
 
-                val shouldUseLowBatteryMode = battery.level < 20 && !battery.isCharging
-                if (shouldUseLowBatteryMode != isLowBatteryMode) {
-                    isLowBatteryMode = shouldUseLowBatteryMode
+                // 6. Tukar profil kuasa secara automatik (Tidur bila pegun > 2 minit, bangun bila bergerak)
+                val stationaryDuration = now - lastMovementTimeMs
+                val targetProfile = when {
+                    battery.level < 20 && !battery.isCharging -> PowerProfile.LOW_BATTERY
+                    stationaryDuration >= IDLE_THRESHOLD_MS -> PowerProfile.STATIONARY_IDLE
+                    else -> PowerProfile.ACTIVE_MOVING
+                }
+                if (targetProfile != currentProfile) {
+                    currentProfile = targetProfile
                     restartLocationUpdates()
                 }
 
+                // 7. Muat naik ke Firestore: segera bila pergerakan sahih, atau heartbeat 5 minit bila pegun
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
-                val minDisplacement = if (isLowBatteryMode) 30f else MIN_DISPLACEMENT_METERS
-
                 val shouldUpload = prevLoc == null ||
-                        movedDistance >= minDisplacement ||
+                        (hasRealDisplacement || hasRealGpsSpeed) ||
                         elapsedSinceLastUpload >= HEARTBEAT_INTERVAL_MS
 
                 if (!shouldUpload) return
 
-                lastUploadedLocation = loc
+                // Jika pegun (heartbeat), kekalkan koordinat asal supaya pin tidak bergetar di peta
+                val uploadLat = if (isMovingNow) loc.latitude else (prevLoc?.latitude ?: loc.latitude)
+                val uploadLng = if (isMovingNow) loc.longitude else (prevLoc?.longitude ?: loc.longitude)
+
+                if (isMovingNow) {
+                    lastUploadedLocation = loc
+                }
                 lastUploadTimeMs = now
 
                 serviceScope.launch {
                     locationRepository.uploadEncryptedLocation(
-                        latitude = loc.latitude,
-                        longitude = loc.longitude,
+                        latitude = uploadLat,
+                        longitude = uploadLng,
                         speedKmh = speedKmh,
                         batteryLevel = battery.level,
                         isCharging = battery.isCharging
                     )
 
-                    val prevHist = lastHistoryLocation
-                    if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
-                        lastHistoryLocation = loc
-                        locationRepository.appendHistoryPoint(loc.latitude, loc.longitude)
+                    if (isMovingNow) {
+                        val prevHist = lastHistoryLocation
+                        if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
+                            lastHistoryLocation = loc
+                            locationRepository.appendHistoryPoint(uploadLat, uploadLng)
+                        }
                     }
                 }
             }
@@ -184,7 +229,11 @@ class LocationTrackingService : Service(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         val battery = BatteryHelper.getBatteryStatus(this)
-        isLowBatteryMode = battery.level < 20 && !battery.isCharging
+        currentProfile = if (battery.level < 20 && !battery.isCharging) {
+            PowerProfile.LOW_BATTERY
+        } else {
+            PowerProfile.ACTIVE_MOVING
+        }
         startLocationUpdates()
         return START_STICKY
     }
@@ -193,16 +242,14 @@ class LocationTrackingService : Service(), SensorEventListener {
     private fun startLocationUpdates() {
         if (!PermissionHelper.hasFineLocation(this)) return
 
-        val priority = if (isLowBatteryMode) {
-            Priority.PRIORITY_BALANCED_POWER_ACCURACY
-        } else {
-            Priority.PRIORITY_HIGH_ACCURACY
+        val (priority, intervalMs, minUpdateMs, minDistance) = when (currentProfile) {
+            PowerProfile.ACTIVE_MOVING -> Quad(Priority.PRIORITY_HIGH_ACCURACY, 15_000L, 8_000L, MIN_DISPLACEMENT_METERS)
+            PowerProfile.STATIONARY_IDLE -> Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 90_000L, 45_000L, MIN_DISPLACEMENT_METERS)
+            PowerProfile.LOW_BATTERY -> Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 180_000L, 90_000L, 35f)
         }
-        val intervalMs = if (isLowBatteryMode) LOW_BATTERY_INTERVAL_MS else ACTIVE_INTERVAL_MS
-        val minDistance = if (isLowBatteryMode) 30f else MIN_DISPLACEMENT_METERS
 
         val request = LocationRequest.Builder(priority, intervalMs)
-            .setMinUpdateIntervalMillis(8_000L)
+            .setMinUpdateIntervalMillis(minUpdateMs)
             .setMinUpdateDistanceMeters(minDistance)
             .build()
 
@@ -246,12 +293,18 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private data class Quad(
+        val priority: Int,
+        val intervalMs: Long,
+        val minUpdateMs: Long,
+        val minDistance: Float
+    )
+
     companion object {
         private const val NOTIFICATION_ID = 3601
-        private const val ACTIVE_INTERVAL_MS = 15_000L
-        private const val LOW_BATTERY_INTERVAL_MS = 120_000L
-        private const val HEARTBEAT_INTERVAL_MS = 300_000L
-        private const val MIN_DISPLACEMENT_METERS = 10f
+        private const val IDLE_THRESHOLD_MS = 120_000L          // Masuk mod tidur selepas 2 minit pegun
+        private const val HEARTBEAT_INTERVAL_MS = 300_000L      // Hantar status pegun setiap 5 minit
+        private const val MIN_DISPLACEMENT_METERS = 25f         // Abaikan getaran GPS bawah 25 meter
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java)
