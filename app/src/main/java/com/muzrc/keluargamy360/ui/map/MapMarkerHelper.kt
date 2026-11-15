@@ -22,6 +22,7 @@ import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
+import kotlin.math.roundToInt
 
 object MapMarkerHelper {
 
@@ -32,7 +33,12 @@ object MapMarkerHelper {
     private const val MEMBERS_SOURCE_ID = "keluargamy360-members-source"
     private const val MEMBERS_SYMBOL_LAYER_ID = "keluargamy360-members-symbol"
 
+    // Cache tandatangan lencana supaya animasi 60fps tidak menjana semula Bitmap berulang kali
+    private val badgeSignatureCache = mutableMapOf<String, String>()
+
     fun setupLayers(style: Style) {
+        badgeSignatureCache.clear()
+
         if (style.getSource(PLACES_SOURCE_ID) == null) {
             style.addSource(GeoJsonSource(PLACES_SOURCE_ID))
         }
@@ -101,12 +107,26 @@ object MapMarkerHelper {
         val source = style.getSourceAs<GeoJsonSource>(MEMBERS_SOURCE_ID) ?: return
 
         val features = members.map { m ->
+            val isMoving = m.speedKmh >= 5f
+            val firstName = m.name.split(" ").first()
+            val label = if (isMoving) {
+                "$firstName • ${m.speedKmh.roundToInt()} km/j"
+            } else {
+                "$firstName • ${m.batteryLevel}%"
+            }
+
             val iconId = "member-pin-${m.uid}"
-            val bitmap = createBadgeBitmap(
-                initial = m.name.take(1).uppercase(),
-                label = "${m.name.split(" ").first()} • ${m.batteryLevel}%"
-            )
-            style.addImage(iconId, bitmap)
+            val signature = "${m.name.take(1)}|$label|$isMoving"
+
+            if (badgeSignatureCache[m.uid] != signature) {
+                val bitmap = createBadgeBitmap(
+                    initial = m.name.take(1).uppercase(),
+                    label = label,
+                    isMoving = isMoving
+                )
+                style.addImage(iconId, bitmap)
+                badgeSignatureCache[m.uid] = signature
+            }
 
             Feature.fromGeometry(Point.fromLngLat(m.longitude, m.latitude)).apply {
                 addStringProperty("iconId", iconId)
@@ -115,7 +135,7 @@ object MapMarkerHelper {
         source.setGeoJson(FeatureCollection.fromFeatures(features))
     }
 
-    private fun createBadgeBitmap(initial: String, label: String): Bitmap {
+    private fun createBadgeBitmap(initial: String, label: String, isMoving: Boolean): Bitmap {
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = 32f
@@ -133,7 +153,10 @@ object MapMarkerHelper {
         val canvas = Canvas(bitmap)
         val centerX = totalWidth / 2f
 
-        val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0D47A1") }
+        val badgeColor = if (isMoving) Color.parseColor("#2E7D32") else Color.parseColor("#0D47A1")
+        val avatarColor = if (isMoving) Color.parseColor("#388E3C") else Color.parseColor("#1976D2")
+
+        val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = badgeColor }
         val pillRect = RectF(centerX - pillWidth / 2f, 4f, centerX + pillWidth / 2f, 4f + pillHeight)
         canvas.drawRoundRect(pillRect, 26f, 26f, pillPaint)
 
@@ -142,7 +165,7 @@ object MapMarkerHelper {
 
         val circleCenterY = 4f + pillHeight + 10f + circleRadius
         val whitePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-        val bluePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#1976D2") }
+        val bluePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = avatarColor }
         canvas.drawCircle(centerX, circleCenterY, circleRadius, whitePaint)
         canvas.drawCircle(centerX, circleCenterY, circleRadius - 5f, bluePaint)
 
