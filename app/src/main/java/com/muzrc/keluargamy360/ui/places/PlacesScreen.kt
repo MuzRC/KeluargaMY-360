@@ -5,10 +5,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,14 +21,12 @@ import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlacesScreen(
-    viewModel: MapViewModel,
-    onNavigateBack: () -> Unit
-) {
+fun PlacesScreen(viewModel: MapViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     var showAddDialog by remember { mutableStateOf(false) }
     var placeName by remember { mutableStateOf("") }
     var radiusMeters by remember { mutableFloatStateOf(150f) }
+    var isPrivateZone by remember { mutableStateOf(false) }
 
     val currentUserId = FirebaseAuth.getInstance().currentUser?.uid
     val myLocation = uiState.members.find { it.uid == currentUserId } ?: uiState.selectedMember
@@ -36,11 +34,11 @@ fun PlacesScreen(
     if (showAddDialog) {
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
-            title = { Text("Tambah Zon Selamat Baharu") },
+            title = { Text("Tambah Zon Selamat") },
             text = {
                 Column {
                     Text(
-                        text = "Zon akan ditetapkan pada koordinat semasa anda (${myLocation?.addressText ?: "Lokasi Semasa"}).",
+                        text = "Lokasi: ${myLocation?.addressText ?: "Koordinat Semasa"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -48,15 +46,45 @@ fun PlacesScreen(
                     OutlinedTextField(
                         value = placeName,
                         onValueChange = { placeName = it },
-                        label = { Text("Nama Tempat (cth: Rumah, Sekolah)") },
+                        label = { Text("Nama Tempat (cth: Rumah, Pejabat)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = !isPrivateZone,
+                            onClick = { isPrivateZone = false },
+                            label = { Text("Keluarga") },
+                            leadingIcon = { Icon(Icons.Default.Group, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = isPrivateZone,
+                            onClick = { isPrivateZone = true },
+                            label = { Text("Peribadi") },
+                            leadingIcon = { Icon(Icons.Default.Lock, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
                     Text(
-                        text = "Jejari Zon: ${radiusMeters.roundToInt()} meter",
-                        style = MaterialTheme.typography.labelMedium
+                        text = if (isPrivateZone) {
+                            "Disimpan di telefon ini sahaja. Ahli lain tidak dapat melihat zon ini."
+                        } else {
+                            "Dikongsi dengan semua ahli dalam kumpulan keluarga."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 4.dp)
                     )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text("Jejari Zon: ${radiusMeters.roundToInt()} meter", style = MaterialTheme.typography.labelMedium)
                     Slider(
                         value = radiusMeters,
                         onValueChange = { radiusMeters = it },
@@ -73,41 +101,31 @@ fun PlacesScreen(
                                 name = placeName,
                                 lat = myLocation.latitude,
                                 lng = myLocation.longitude,
-                                radiusMeters = radiusMeters
+                                radiusMeters = radiusMeters,
+                                isPrivate = isPrivateZone
                             )
                             placeName = ""
                             showAddDialog = false
                         }
                     },
                     enabled = myLocation != null && placeName.isNotBlank()
-                ) {
-                    Text("Simpan Zon")
-                }
+                ) { Text("Simpan") }
             },
             dismissButton = {
-                TextButton(onClick = { showAddDialog = false }) {
-                    Text("Batal")
-                }
+                TextButton(onClick = { showAddDialog = false }) { Text("Batal") }
             }
         )
     }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Zon Selamat Keluarga") },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Kembali")
-                    }
-                }
-            )
+            TopAppBar(title = { Text("Zon Selamat", fontWeight = FontWeight.Bold) })
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { showAddDialog = true },
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("Tambah Lokasi") }
+                icon = { Icon(Icons.Default.Add, null) },
+                text = { Text("Tambah Zon") }
             )
         }
     ) { innerPadding ->
@@ -115,63 +133,40 @@ fun PlacesScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(16.dp)
+                .padding(horizontal = 16.dp)
         ) {
-            Text(
-                text = "Terima pemberitahuan automatik apabila anda tiba atau keluar dari kawasan ini.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 16.dp)
-            )
-
             if (uiState.safePlaces.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = "Tiada zon selamat didaftarkan lagi.\nTekan '+ Tambah Lokasi' untuk mula.",
+                        text = "Tiada zon selamat didaftarkan lagi.\nTekan '+ Tambah Zon' untuk mula.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(uiState.safePlaces, key = { it.placeId }) { place ->
-                        Card(
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
+                    items(uiState.safePlaces, key = { "${it.isPrivate}_${it.placeId}" }) { place ->
+                        Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
+                                modifier = Modifier.fillMaxWidth().padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Place,
+                                    imageVector = if (place.isPrivate) Icons.Default.Lock else Icons.Default.Group,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                                    tint = if (place.isPrivate) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
+                                    Text(place.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                     Text(
-                                        text = place.name,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = "Jejari ${place.radiusMeters.roundToInt()} meter",
+                                        text = "${if (place.isPrivate) "Peribadi (Telefon)" else "Kongsi Keluarga"} • ${place.radiusMeters.roundToInt()}m",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                IconButton(onClick = { viewModel.deleteSafePlace(place.placeId) }) {
-                                    Icon(
-                                        imageVector = Icons.Default.Delete,
-                                        contentDescription = "Padam Zon",
-                                        tint = MaterialTheme.colorScheme.error
-                                    )
+                                IconButton(onClick = { viewModel.deleteSafePlace(place) }) {
+                                    Icon(Icons.Default.Delete, "Padam", tint = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
