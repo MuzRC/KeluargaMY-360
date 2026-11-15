@@ -22,6 +22,7 @@ import com.muzrc.keluargamy360.data.model.User
 import com.muzrc.keluargamy360.data.model.UserLocation
 import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.service.GeofenceReceiver
+import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.CryptoHelper
 import com.muzrc.keluargamy360.util.PermissionHelper
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +42,8 @@ data class MapUiState(
     val safePlaces: List<SafePlace> = emptyList(),
     val activeSosAlert: String? = null,
     val statusMessage: String? = null,
-    val isSendingSos: Boolean = false
+    val isSendingSos: Boolean = false,
+    val isTrackingEnabled: Boolean = true
 )
 
 class MapViewModel(
@@ -53,7 +55,9 @@ class MapViewModel(
 
     private val locationRepository = LocationRepository(secureStorage)
 
-    private val _uiState = MutableStateFlow(MapUiState())
+    private val _uiState = MutableStateFlow(
+        MapUiState(isTrackingEnabled = secureStorage.isTrackingEnabled())
+    )
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
 
     private var locationsListener: ListenerRegistration? = null
@@ -155,7 +159,7 @@ class MapViewModel(
                 registerSystemGeofences(places)
             }
 
-        // 3. Dengar amaran kecemasan SOS baharu
+        // 3. Dengar amaran kecemasan SOS & daftar masuk selamat daripada ahli lain
         alertsListener?.remove()
         alertsListener = db.collection("families").document(familyId)
             .collection("alerts")
@@ -165,9 +169,16 @@ class MapViewModel(
                 for (change in snapshot.documentChanges) {
                     val senderId = change.document.getString("senderId") ?: continue
                     if (senderId == auth.currentUser?.uid) continue
+
+                    val alertType = change.document.getString("type") ?: "SOS"
                     val senderName = change.document.getString("senderName") ?: "Ahli Keluarga"
-                    _uiState.update {
-                        it.copy(activeSosAlert = "AMARAN SOS daripada $senderName! Sila semak lokasi beliau segera.")
+                    val msg = change.document.getString("message")
+                        ?: "AMARAN SOS daripada $senderName! Sila semak lokasi beliau segera."
+
+                    if (alertType == "CHECKIN") {
+                        _uiState.update { it.copy(statusMessage = msg) }
+                    } else {
+                        _uiState.update { it.copy(activeSosAlert = msg) }
                     }
                 }
             }
@@ -210,6 +221,48 @@ class MapViewModel(
 
     fun selectMember(member: DecryptedMemberLocation) {
         _uiState.update { it.copy(selectedMember = member) }
+    }
+
+    fun toggleTracking(enabled: Boolean) {
+        secureStorage.setTrackingEnabled(enabled)
+        _uiState.update {
+            it.copy(
+                isTrackingEnabled = enabled,
+                statusMessage = if (enabled) {
+                    "Perkongsian lokasi masa nyata disambung semula."
+                } else {
+                    "Perkongsian lokasi dijeda sementara."
+                }
+            )
+        }
+        if (enabled) {
+            LocationTrackingService.start(appContext)
+        } else {
+            LocationTrackingService.stop(appContext)
+        }
+    }
+
+    fun sendSafeCheckIn() {
+        val myUid = auth.currentUser?.uid ?: return
+        val me = _uiState.value.members.find { it.uid == myUid }
+        val senderName = me?.name ?: auth.currentUser?.displayName ?: "Ahli Keluarga"
+        val address = me?.addressText ?: "lokasi terkini"
+
+        viewModelScope.launch {
+            val res = locationRepository.sendSafeCheckIn(senderName, address)
+            res.fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(statusMessage = "Status 'Saya Selamat' di $address telah dihantar!")
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(statusMessage = "Gagal menghantar status: ${err.message}")
+                    }
+                }
+            )
+        }
     }
 
     fun triggerSos() {
