@@ -15,9 +15,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.AuthRepository
 import com.muzrc.keluargamy360.data.repository.FamilyRepository
@@ -27,6 +29,7 @@ import com.muzrc.keluargamy360.ui.auth.LoginScreen
 import com.muzrc.keluargamy360.ui.auth.RegisterScreen
 import com.muzrc.keluargamy360.ui.family.FamilyViewModel
 import com.muzrc.keluargamy360.ui.family.JoinCreateScreen
+import com.muzrc.keluargamy360.ui.family.UnlockFamilyScreen
 import com.muzrc.keluargamy360.ui.map.MapScreen
 import com.muzrc.keluargamy360.ui.map.MapViewModel
 import com.muzrc.keluargamy360.ui.places.PlacesScreen
@@ -45,7 +48,6 @@ fun AppNavigation() {
     var startDestination by remember { mutableStateOf<String?>(null) }
     var availableUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
 
-    // Semak sesi pengguna & kemas kini aplikasi semasa mula dibuka
     LaunchedEffect(Unit) {
         availableUpdate = UpdateChecker.checkForUpdate()
 
@@ -59,12 +61,17 @@ fun AppNavigation() {
             if (!savedFamilyId.isNullOrBlank() && !savedMasterKey.isNullOrBlank()) {
                 startDestination = "map"
             } else {
-                startDestination = "family_lobby"
+                val profile = authRepository.getCurrentUserProfile()
+                val existingFamilyId = profile?.familyId.orEmpty()
+                startDestination = if (existingFamilyId.isNotBlank()) {
+                    "unlock_family/$existingFamilyId"
+                } else {
+                    "family_lobby"
+                }
             }
         }
     }
 
-    // Papar dialog jika terdapat versi APK baharu di GitHub Releases
     availableUpdate?.let { update ->
         AlertDialog(
             onDismissRequest = { availableUpdate = null },
@@ -100,10 +107,14 @@ fun AppNavigation() {
             val authViewModel: AuthViewModel = viewModel { AuthViewModel(authRepository) }
             LoginScreen(
                 viewModel = authViewModel,
-                onLoginSuccess = {
-                    val hasFamilyKey = !secureStorage.getFamilyId().isNullOrBlank() &&
+                onLoginSuccess = { user ->
+                    val hasLocalKey = !secureStorage.getFamilyId().isNullOrBlank() &&
                             !secureStorage.getFamilyMasterKey().isNullOrBlank()
-                    val dest = if (hasFamilyKey) "map" else "family_lobby"
+                    val dest = when {
+                        hasLocalKey -> "map"
+                        user.familyId.isNotBlank() -> "unlock_family/${user.familyId}"
+                        else -> "family_lobby"
+                    }
                     navController.navigate(dest) {
                         popUpTo("login") { inclusive = true }
                     }
@@ -129,6 +140,36 @@ fun AppNavigation() {
             )
         }
 
+        composable(
+            route = "unlock_family/{familyId}",
+            arguments = listOf(navArgument("familyId") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val familyId = backStackEntry.arguments?.getString("familyId").orEmpty()
+            val familyViewModel: FamilyViewModel = viewModel { FamilyViewModel(familyRepository) }
+            UnlockFamilyScreen(
+                familyId = familyId,
+                viewModel = familyViewModel,
+                onUnlocked = {
+                    navController.navigate("map") {
+                        popUpTo("unlock_family/$familyId") { inclusive = true }
+                    }
+                },
+                onSwitchFamily = {
+                    navController.navigate("family_lobby") {
+                        popUpTo("unlock_family/$familyId") { inclusive = true }
+                    }
+                },
+                onSignOut = {
+                    LocationTrackingService.stop(context)
+                    secureStorage.clearSession()
+                    authRepository.signOut()
+                    navController.navigate("login") {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
+
         composable("family_lobby") {
             val familyViewModel: FamilyViewModel = viewModel { FamilyViewModel(familyRepository) }
             JoinCreateScreen(
@@ -143,7 +184,7 @@ fun AppNavigation() {
                     secureStorage.clearSession()
                     authRepository.signOut()
                     navController.navigate("login") {
-                        popUpTo("family_lobby") { inclusive = true }
+                        popUpTo(0) { inclusive = true }
                     }
                 }
             )
@@ -163,7 +204,7 @@ fun AppNavigation() {
                     secureStorage.clearSession()
                     authRepository.signOut()
                     navController.navigate("login") {
-                        popUpTo("map") { inclusive = true }
+                        popUpTo(0) { inclusive = true }
                     }
                 }
             )
