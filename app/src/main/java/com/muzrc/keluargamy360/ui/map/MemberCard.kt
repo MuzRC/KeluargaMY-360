@@ -1,7 +1,11 @@
 package com.muzrc.keluargamy360.ui.map
 
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -11,6 +15,7 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -18,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,10 +37,11 @@ fun MemberCard(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
     val batteryColor = when {
-        member.isCharging -> Color(0xFF2E7D32)
-        member.batteryLevel <= 20 -> Color(0xFFC62828)
+        member.isCharging -> Color(0xFF4CAF50)
+        member.batteryLevel <= 15 -> Color(0xFFEF5350)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -66,6 +73,7 @@ fun MemberCard(
                     modifier = Modifier
                         .size(48.dp)
                         .clip(CircleShape)
+                        .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
                 )
             } else {
                 Box(
@@ -141,8 +149,9 @@ fun MemberCard(
                 )
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
 
+            // Status Bateri
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     imageVector = if (member.isCharging) Icons.Default.BatteryChargingFull else Icons.Default.BatteryStd,
@@ -155,6 +164,29 @@ fun MemberCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = batteryColor,
                     fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
+            // Butang Navigasi Terus ke Lokasi Ahli (Waze / Google Maps)
+            IconButton(
+                onClick = {
+                    val uri = Uri.parse(
+                        "geo:${member.latitude},${member.longitude}?q=${member.latitude},${member.longitude}(${Uri.encode(member.name)})"
+                    )
+                    val navIntent = Intent(Intent.ACTION_VIEW, uri)
+                    try {
+                        context.startActivity(Intent.createChooser(navIntent, "Buka laluan ke ${member.name}"))
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Tiada aplikasi peta/navigasi dijumpai.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Navigation,
+                    contentDescription = "Arah ke ${member.name}",
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
         }
