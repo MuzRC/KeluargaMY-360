@@ -66,10 +66,37 @@ class LocationRepository(
         return try {
             val encryptedCoords = CryptoHelper.encrypt("$latitude|$longitude", masterKey)
             val alertData = mapOf(
+                "type" to "SOS",
                 "senderId" to uid,
                 "senderName" to senderName,
+                "message" to "AMARAN SOS daripada $senderName! Sila semak lokasi beliau segera.",
                 "encryptedCoords" to encryptedCoords.ciphertextBase64,
                 "iv" to encryptedCoords.ivBase64,
+                "timestamp" to System.currentTimeMillis()
+            )
+            db.collection("families").document(familyId)
+                .collection("alerts")
+                .add(alertData)
+                .await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Hantar pemberitahuan daftar masuk pantas ("Saya Selamat") kepada keluarga.
+     */
+    suspend fun sendSafeCheckIn(senderName: String, addressText: String): Result<Unit> {
+        val uid = auth.currentUser?.uid ?: return Result.failure(Exception("Tidak log masuk"))
+        val familyId = secureStorage.getFamilyId() ?: return Result.failure(Exception("Tiada keluarga"))
+
+        return try {
+            val alertData = mapOf(
+                "type" to "CHECKIN",
+                "senderId" to uid,
+                "senderName" to senderName,
+                "message" to "$senderName telah daftar masuk selamat di $addressText.",
                 "timestamp" to System.currentTimeMillis()
             )
             db.collection("families").document(familyId)
