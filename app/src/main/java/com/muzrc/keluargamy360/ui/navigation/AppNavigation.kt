@@ -30,9 +30,7 @@ import com.muzrc.keluargamy360.ui.auth.RegisterScreen
 import com.muzrc.keluargamy360.ui.family.FamilyViewModel
 import com.muzrc.keluargamy360.ui.family.JoinCreateScreen
 import com.muzrc.keluargamy360.ui.family.UnlockFamilyScreen
-import com.muzrc.keluargamy360.ui.map.MapScreen
 import com.muzrc.keluargamy360.ui.map.MapViewModel
-import com.muzrc.keluargamy360.ui.places.PlacesScreen
 import com.muzrc.keluargamy360.util.AppUpdateInfo
 import com.muzrc.keluargamy360.util.UpdateChecker
 
@@ -194,11 +192,8 @@ fun AppNavigation() {
             val mapViewModel: MapViewModel = viewModel {
                 MapViewModel(context.applicationContext, secureStorage)
             }
-            MapScreen(
-                viewModel = mapViewModel,
-                onNavigateToPlaces = {
-                    navController.navigate("places")
-                },
+            MainDashboardScreen(
+                mapViewModel = mapViewModel,
                 onSignOut = {
                     LocationTrackingService.stop(context)
                     secureStorage.clearSession()
@@ -206,18 +201,6 @@ fun AppNavigation() {
                     navController.navigate("login") {
                         popUpTo(0) { inclusive = true }
                     }
-                }
-            )
-        }
-
-        composable("places") {
-            val mapViewModel: MapViewModel = viewModel {
-                MapViewModel(context.applicationContext, secureStorage)
-            }
-            PlacesScreen(
-                viewModel = mapViewModel,
-                onNavigateBack = {
-                    navController.popBackStack()
                 }
             )
         }
