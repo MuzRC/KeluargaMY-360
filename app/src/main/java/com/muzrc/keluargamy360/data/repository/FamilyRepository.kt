@@ -104,6 +104,29 @@ class FamilyRepository(
         }
     }
 
+    /**
+     * Nyahsulit Kunci Utama Keluarga bagi ahli sedia ada menggunakan PIN 6-digit sahaja.
+     */
+    suspend fun unlockFamilyWithPin(familyId: String, securityPin: String): Result<FamilyGroup> {
+        return try {
+            val doc = db.collection("families").document(familyId).get().await()
+            val group = doc.toObject(FamilyGroup::class.java)
+                ?: return Result.failure(Exception("Data kumpulan keluarga tidak dijumpai."))
+
+            val masterKey = CryptoHelper.unwrapKeyWithPin(
+                wrappedKeyBase64 = group.wrappedMasterKey,
+                ivBase64 = group.keyIv,
+                pin = securityPin,
+                saltBase64 = group.keySalt
+            ) ?: return Result.failure(Exception("PIN Keselamatan salah. Sila cuba lagi."))
+
+            secureStorage.saveFamilySession(group.familyId, masterKey)
+            Result.success(group)
+        } catch (e: Exception) {
+            Result.failure(Exception("Gagal membuka kunci keluarga: ${e.localizedMessage}"))
+        }
+    }
+
     suspend fun getFamilyGroup(familyId: String): FamilyGroup? {
         return try {
             val doc = db.collection("families").document(familyId).get().await()
