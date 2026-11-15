@@ -73,7 +73,6 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
                 val elapsedSec = ((now - lastUploadTimeMs) / 1000f).coerceAtLeast(1f)
 
-                // Kira kelajuan: guna sensor GPS jika ada, atau kiraan jarak/masa jika 0
                 val gpsSpeedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
                 val calculatedSpeedKmh = if (prevLoc != null && movedDistance >= 10f) {
                     (movedDistance / elapsedSec) * 3.6f
@@ -85,11 +84,9 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
 
-                // 1. Hidupkan sensor accelerometer HANYA bila memandu >= 25 km/j
                 val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
                 updateCrashSensorState(shouldMonitorCrash)
 
-                // 2. Amaran Bateri Lemah (< 15%)
                 if (secureStorage.isLowBatteryAlertEnabled() && battery.level < 15 && !battery.isCharging) {
                     if (!sentLowBatteryAlert) {
                         sentLowBatteryAlert = true
@@ -104,7 +101,6 @@ class LocationTrackingService : Service(), SensorEventListener {
                     sentLowBatteryAlert = false
                 }
 
-                // 3. Amaran Had Laju Pemanduan
                 val speedLimit = secureStorage.getSpeedLimitKmh()
                 if (secureStorage.isSpeedAlertEnabled() && speedKmh > speedLimit) {
                     if (now - lastSpeedAlertTimeMs > 600_000L) {
@@ -118,14 +114,12 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
 
-                // 4. Mod Jimat Bateri Kritikal (< 20%)
                 val shouldUseLowBatteryMode = battery.level < 20 && !battery.isCharging
                 if (shouldUseLowBatteryMode != isLowBatteryMode) {
                     isLowBatteryMode = shouldUseLowBatteryMode
                     restartLocationUpdates()
                 }
 
-                // 5. Muat naik segera jika bergerak >= 10 meter, atau heartbeat setiap 5 minit bila pegun
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
                 val minDisplacement = if (isLowBatteryMode) 30f else MIN_DISPLACEMENT_METERS
 
@@ -147,7 +141,6 @@ class LocationTrackingService : Service(), SensorEventListener {
                         isCharging = battery.isCharging
                     )
 
-                    // 6. Rekod titik Sejarah Laluan 24 Jam jika bergerak >= 80 meter
                     val prevHist = lastHistoryLocation
                     if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
                         lastHistoryLocation = loc
@@ -255,10 +248,10 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
-        private const val ACTIVE_INTERVAL_MS = 15_000L          // Semak setiap 15 saat
-        private const val LOW_BATTERY_INTERVAL_MS = 120_000L    // 2 minit bila bateri < 20%
-        private const val HEARTBEAT_INTERVAL_MS = 300_000L      // 5 minit bila duduk pegun (< 10m)
-        private const val MIN_DISPLACEMENT_METERS = 10f         // Muat naik sebaik bergerak 10 meter
+        private const val ACTIVE_INTERVAL_MS = 15_000L
+        private const val LOW_BATTERY_INTERVAL_MS = 120_000L
+        private const val HEARTBEAT_INTERVAL_MS = 300_000L
+        private const val MIN_DISPLACEMENT_METERS = 10f
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java)
