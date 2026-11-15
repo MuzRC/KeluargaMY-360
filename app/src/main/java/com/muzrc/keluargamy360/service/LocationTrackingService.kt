@@ -34,6 +34,12 @@ import kotlin.math.sqrt
 
 class LocationTrackingService : Service(), SensorEventListener {
 
+    private enum class TrackingProfile {
+        NORMAL,
+        DRIVING,
+        LOW_BATTERY
+    }
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var secureStorage: SecureStorage
     private lateinit var fusedLocationClient: FusedLocationProviderClient
@@ -48,7 +54,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastHistoryLocation: Location? = null
     private var lastUploadTimeMs: Long = 0L
     private var lastSpeedKmh: Float = 0f
-    private var isLowBatteryMode: Boolean = false
+    private var currentProfile: TrackingProfile = TrackingProfile.NORMAL
 
     private var sentLowBatteryAlert = false
     private var lastSpeedAlertTimeMs: Long = 0L
@@ -73,7 +79,7 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
 
-                // 1. Hidupkan sensor accelerometer HANYA bila memandu > 25 km/j (Jimat bateri)
+                // 1. Hidupkan sensor accelerometer HANYA bila memandu >= 25 km/j
                 val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
                 updateCrashSensorState(shouldMonitorCrash)
 
@@ -84,7 +90,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                         serviceScope.launch {
                             locationRepository.postFamilyAlert(
                                 type = "BATTERY",
-                                message = "Amaran Bateri: Bateri telefon $userName tinggal ${battery.level}%!"
+                                message = "Amaran Bateri: Bateri telefon $userName tinggal${battery.level}%!"
                             )
                         }
                     }
@@ -100,16 +106,20 @@ class LocationTrackingService : Service(), SensorEventListener {
                         serviceScope.launch {
                             locationRepository.postFamilyAlert(
                                 type = "SPEED",
-                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had: ${speedLimit.roundToInt()} km/j)."
+                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had:${speedLimit.roundToInt()} km/j)."
                             )
                         }
                     }
                 }
 
-                // 4. Mod Jimat Bateri Kritikal (< 20%)
-                val shouldUseLowBatteryMode = battery.level < 20 && !battery.isCharging
-                if (shouldUseLowBatteryMode != isLowBatteryMode) {
-                    isLowBatteryMode = shouldUseLowBatteryMode
+                // 4. Pilih profil penjejakan dinamik (Memandu 15s / Biasa 60s / Bateri Lemah 180s)
+                val targetProfile = when {
+                    battery.level < 20 && !battery.isCharging -> TrackingProfile.LOW_BATTERY
+                    speedKmh >= 15f -> TrackingProfile.DRIVING
+                    else -> TrackingProfile.NORMAL
+                }
+                if (targetProfile != currentProfile) {
+                    currentProfile = targetProfile
                     restartLocationUpdates()
                 }
 
@@ -117,9 +127,10 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val prevLoc = lastUploadedLocation
                 val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
+                val minDisplacement = if (currentProfile == TrackingProfile.DRIVING) 15f else MIN_DISPLACEMENT_METERS
 
                 val shouldUpload = prevLoc == null ||
-                        movedDistance >= MIN_DISPLACEMENT_METERS ||
+                        movedDistance >= minDisplacement ||
                         elapsedSinceLastUpload >= HEARTBEAT_INTERVAL_MS
 
                 if (!shouldUpload) return
@@ -166,7 +177,6 @@ class LocationTrackingService : Service(), SensorEventListener {
         val z = event.values[2]
         val gForce = sqrt((x * x + y * y + z * z).toDouble()) / SensorManager.GRAVITY_EARTH
 
-        // Kesan impak kuat (> 4.5G) semasa bergerak laju (> 25 km/j)
         if (gForce >= 4.5 && lastSpeedKmh >= 25f) {
             val now = System.currentTimeMillis()
             if (now - lastCrashTriggerTimeMs > 60_000L) {
@@ -181,7 +191,11 @@ class LocationTrackingService : Service(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         val battery = BatteryHelper.getBatteryStatus(this)
-        isLowBatteryMode = battery.level < 20 && !battery.isCharging
+        currentProfile = if (battery.level < 20 && !battery.isCharging) {
+            TrackingProfile.LOW_BATTERY
+        } else {
+            TrackingProfile.NORMAL
+        }
         startLocationUpdates()
         return START_STICKY
     }
@@ -190,10 +204,13 @@ class LocationTrackingService : Service(), SensorEventListener {
     private fun startLocationUpdates() {
         if (!PermissionHelper.hasFineLocation(this)) return
 
-        val intervalMs = if (isLowBatteryMode) LOW_BATTERY_INTERVAL_MS else NORMAL_INTERVAL_MS
-        val minDistance = if (isLowBatteryMode) 50f else MIN_DISPLACEMENT_METERS
+        val (priority, intervalMs, minDistance) = when (currentProfile) {
+            TrackingProfile.DRIVING -> Triple(Priority.PRIORITY_HIGH_ACCURACY, DRIVING_INTERVAL_MS, 15f)
+            TrackingProfile.LOW_BATTERY -> Triple(Priority.PRIORITY_BALANCED_POWER_ACCURACY, LOW_BATTERY_INTERVAL_MS, 50f)
+            TrackingProfile.NORMAL -> Triple(Priority.PRIORITY_BALANCED_POWER_ACCURACY, NORMAL_INTERVAL_MS, MIN_DISPLACEMENT_METERS)
+        }
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, intervalMs)
+        val request = LocationRequest.Builder(priority, intervalMs)
             .setMinUpdateIntervalMillis(intervalMs / 2)
             .setMinUpdateDistanceMeters(minDistance)
             .build()
@@ -240,9 +257,10 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
-        private const val NORMAL_INTERVAL_MS = 60_000L
-        private const val LOW_BATTERY_INTERVAL_MS = 180_000L
-        private const val HEARTBEAT_INTERVAL_MS = 300_000L
+        private const val DRIVING_INTERVAL_MS = 15_000L        // 15 saat bila memandu (>= 15 km/j)
+        private const val NORMAL_INTERVAL_MS = 60_000L         // 60 saat semasa biasa
+        private const val LOW_BATTERY_INTERVAL_MS = 180_000L   // 3 minit bila bateri < 20%
+        private const val HEARTBEAT_INTERVAL_MS = 300_000L     // 5 minit bila duduk pegun
         private const val MIN_DISPLACEMENT_METERS = 30f
 
         fun start(context: Context) {
