@@ -78,7 +78,20 @@ fun MapScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+        LaunchedEffect(
+        uiState.selectedMember?.uid,
+        uiState.selectedMember?.latitude,
+        uiState.selectedMember?.longitude,
+        mapLibreMap
+    ) {
+        val map = mapLibreMap ?: return@LaunchedEffect
+        val target = uiState.selectedMember ?: return@LaunchedEffect
+        map.animateCamera(
+            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 16.0),
+            1200
+        )
+    }
+Unit) {
         val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
@@ -148,13 +161,7 @@ fun MapScreen(
         MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
 
-    LaunchedEffect(uiState.selectedMember, mapLibreMap) {
-        val map = mapLibreMap ?: return@LaunchedEffect
-        val target = uiState.selectedMember ?: return@LaunchedEffect
-        map.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 15.5)
-        )
-    }
+    
 
     uiState.activeSosAlert?.let { alertMsg ->
         AlertDialog(
@@ -388,3 +395,4 @@ fun MapScreen(
         }
     }
 }
+
