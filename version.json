@@ -1,6 +1,6 @@
 {
-  "latestVersion": "1.0.80",
-  "versionCode": 80,
-  "releaseNotes": "Create app/src/main/java/com/muzrc/keluargamy360/util/DeviceRingerHelper.kt",
-  "downloadUrl": "https://github.com/MuzRC/KeluargaMY-360/releases/download/v1.0.80/KeluargaMY360-v1.0.80-signed.apk"
+  "latestVersion": "1.0.85",
+  "versionCode": 85,
+  "releaseNotes": "Update MapMarkerHelper.kt",
+  "downloadUrl": "https://github.com/MuzRC/KeluargaMY-360/releases/download/v1.0.85/KeluargaMY360-v1.0.85-signed.apk"
 }
