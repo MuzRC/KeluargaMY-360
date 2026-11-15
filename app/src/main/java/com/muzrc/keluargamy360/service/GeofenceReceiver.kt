@@ -11,8 +11,14 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingEvent
+import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.KeluargaApp
 import com.muzrc.keluargamy360.MainActivity
+import com.muzrc.keluargamy360.data.local.SecureStorage
+import com.muzrc.keluargamy360.data.repository.LocationRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class GeofenceReceiver : BroadcastReceiver() {
 
@@ -22,15 +28,37 @@ class GeofenceReceiver : BroadcastReceiver() {
 
         val transition = geofencingEvent.geofenceTransition
         val triggeringGeofences = geofencingEvent.triggeringGeofences ?: return
+        val secureStorage = SecureStorage(context)
+        val locationRepo = LocationRepository(secureStorage)
+        val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
 
         for (geofence in triggeringGeofences) {
             val placeName = geofence.requestId
-            val message = when (transition) {
+            val localMsg = when (transition) {
                 Geofence.GEOFENCE_TRANSITION_ENTER -> "Anda telah tiba di zon selamat: $placeName."
                 Geofence.GEOFENCE_TRANSITION_EXIT -> "Anda telah keluar dari zon selamat: $placeName."
                 else -> continue
             }
-            showGeofenceNotification(context, placeName, message)
+            val familyMsg = when (transition) {
+                Geofence.GEOFENCE_TRANSITION_ENTER -> "$userName telah tiba di zon $placeName."
+                Geofence.GEOFENCE_TRANSITION_EXIT -> "$userName telah keluar dari zon $placeName."
+                else -> continue
+            }
+
+            showGeofenceNotification(context, placeName, localMsg)
+
+            // Rekod ke Log Aktiviti Keluarga jika ia bukan zon peribadi
+            val isPrivate = secureStorage.getPrivatePlaces().any { it.name == placeName }
+            if (!isPrivate) {
+                val pendingResult = goAsync()
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        locationRepo.postFamilyAlert(type = "GEOFENCE", message = familyMsg)
+                    } finally {
+                        pendingResult.finish()
+                    }
+                }
+            }
         }
     }
 

@@ -6,55 +6,114 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
+import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.KeluargaApp
 import com.muzrc.keluargamy360.MainActivity
 import com.muzrc.keluargamy360.R
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.util.BatteryHelper
+import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.PermissionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
-class LocationTrackingService : Service() {
+class LocationTrackingService : Service(), SensorEventListener {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var secureStorage: SecureStorage
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
     private lateinit var locationRepository: LocationRepository
 
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+    private var isSensorActive = false
+
     private var lastUploadedLocation: Location? = null
+    private var lastHistoryLocation: Location? = null
     private var lastUploadTimeMs: Long = 0L
+    private var lastSpeedKmh: Float = 0f
     private var isLowBatteryMode: Boolean = false
+
+    private var sentLowBatteryAlert = false
+    private var lastSpeedAlertTimeMs: Long = 0L
+    private var lastCrashTriggerTimeMs: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
-        val secureStorage = SecureStorage(this)
+        secureStorage = SecureStorage(this)
         locationRepository = LocationRepository(secureStorage)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 val loc = result.lastLocation ?: return
                 val now = System.currentTimeMillis()
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
+                val speedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
+                lastSpeedKmh = speedKmh
 
-                // 1. Tukar profil kuasa secara automatik jika bateri bawah 20% & tidak dicas
+                val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
+
+                // 1. Hidupkan sensor accelerometer HANYA bila memandu > 25 km/j (Jimat bateri)
+                val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
+                updateCrashSensorState(shouldMonitorCrash)
+
+                // 2. Amaran Bateri Lemah (< 15%)
+                if (secureStorage.isLowBatteryAlertEnabled() && battery.level < 15 && !battery.isCharging) {
+                    if (!sentLowBatteryAlert) {
+                        sentLowBatteryAlert = true
+                        serviceScope.launch {
+                            locationRepository.postFamilyAlert(
+                                type = "BATTERY",
+                                message = "Amaran Bateri: Bateri telefon $userName tinggal ${battery.level}%!"
+                            )
+                        }
+                    }
+                } else if (battery.level >= 20 || battery.isCharging) {
+                    sentLowBatteryAlert = false
+                }
+
+                // 3. Amaran Had Laju Pemanduan
+                val speedLimit = secureStorage.getSpeedLimitKmh()
+                if (secureStorage.isSpeedAlertEnabled() && speedKmh > speedLimit) {
+                    if (now - lastSpeedAlertTimeMs > 600_000L) {
+                        lastSpeedAlertTimeMs = now
+                        serviceScope.launch {
+                            locationRepository.postFamilyAlert(
+                                type = "SPEED",
+                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had: ${speedLimit.roundToInt()} km/j)."
+                            )
+                        }
+                    }
+                }
+
+                // 4. Mod Jimat Bateri Kritikal (< 20%)
                 val shouldUseLowBatteryMode = battery.level < 20 && !battery.isCharging
                 if (shouldUseLowBatteryMode != isLowBatteryMode) {
                     isLowBatteryMode = shouldUseLowBatteryMode
                     restartLocationUpdates()
                 }
 
-                // 2. Tapis muat naik: hanya hantar jika bergerak >= 30m atau cukup 5 minit (heartbeat)
+                // 5. Penapisan muat naik lokasi semasa
                 val prevLoc = lastUploadedLocation
                 val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
@@ -67,7 +126,6 @@ class LocationTrackingService : Service() {
 
                 lastUploadedLocation = loc
                 lastUploadTimeMs = now
-                val speedKmh = (loc.speed * 3.6f).coerceAtLeast(0f)
 
                 serviceScope.launch {
                     locationRepository.uploadEncryptedLocation(
@@ -77,10 +135,48 @@ class LocationTrackingService : Service() {
                         batteryLevel = battery.level,
                         isCharging = battery.isCharging
                     )
+
+                    // 6. Rekod titik Sejarah Laluan 24 Jam jika bergerak >= 100 meter
+                    val prevHist = lastHistoryLocation
+                    if (prevHist == null || prevHist.distanceTo(loc) >= 100f) {
+                        lastHistoryLocation = loc
+                        locationRepository.appendHistoryPoint(loc.latitude, loc.longitude)
+                    }
                 }
             }
         }
     }
+
+    private fun updateCrashSensorState(enable: Boolean) {
+        if (enable && !isSensorActive) {
+            accelerometer?.let {
+                sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+                isSensorActive = true
+            }
+        } else if (!enable && isSensorActive) {
+            sensorManager?.unregisterListener(this)
+            isSensorActive = false
+        }
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type != Sensor.TYPE_ACCELEROMETER) return
+        val x = event.values[0]
+        val y = event.values[1]
+        val z = event.values[2]
+        val gForce = sqrt((x * x + y * y + z * z).toDouble()) / SensorManager.GRAVITY_EARTH
+
+        // Kesan impak kuat (> 4.5G) semasa bergerak laju (> 25 km/j)
+        if (gForce >= 4.5 && lastSpeedKmh >= 25f) {
+            val now = System.currentTimeMillis()
+            if (now - lastCrashTriggerTimeMs > 60_000L) {
+                lastCrashTriggerTimeMs = now
+                CrashAlertBus.triggerCrashCountdown()
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -134,6 +230,7 @@ class LocationTrackingService : Service() {
     }
 
     override fun onDestroy() {
+        updateCrashSensorState(false)
         fusedLocationClient.removeLocationUpdates(locationCallback)
         serviceScope.cancel()
         super.onDestroy()
@@ -143,9 +240,9 @@ class LocationTrackingService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
-        private const val NORMAL_INTERVAL_MS = 60_000L          // 1 minit semasa biasa
-        private const val LOW_BATTERY_INTERVAL_MS = 180_000L    // 3 minit jika bateri < 20%
-        private const val HEARTBEAT_INTERVAL_MS = 300_000L      // 5 minit jika duduk pegun
+        private const val NORMAL_INTERVAL_MS = 60_000L
+        private const val LOW_BATTERY_INTERVAL_MS = 180_000L
+        private const val HEARTBEAT_INTERVAL_MS = 300_000L
         private const val MIN_DISPLACEMENT_METERS = 30f
 
         fun start(context: Context) {
