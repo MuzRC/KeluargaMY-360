@@ -1,10 +1,12 @@
 package com.muzrc.keluargamy360.ui.map
 
 import android.Manifest
+import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
+import android.view.animation.DecelerateInterpolator
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +36,7 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +56,10 @@ fun MapScreen(
     var hasBatteryExemption by remember {
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
     }
+
+    // Simpan koordinat semasa setiap pin untuk animasi gelongsor lancar (smooth gliding)
+    val renderedCoords = remember { mutableMapOf<String, Pair<Double, Double>>() }
+    var activePinAnimator by remember { mutableStateOf<ValueAnimator?>(null) }
 
     val bgPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -93,9 +100,50 @@ fun MapScreen(
         }
     }
 
-    LaunchedEffect(uiState.members, uiState.safePlaces, uiState.activeHistoryRoute, mapLibreMap) {
+    // Animasi pergerakan pin meluncur lancar di atas jalan setiap kali koordinat baharu tiba
+    DisposableEffect(uiState.members, mapLibreMap) {
+        val map = mapLibreMap
+        val targetMembers = uiState.members
+
+        if (map != null && targetMembers.isNotEmpty()) {
+            activePinAnimator?.cancel()
+
+            val startSnapshot = targetMembers.associate { m ->
+                val prev = renderedCoords[m.uid]
+                // Jika titik baharu atau lompatan terlalu jauh (> ~5km), terus letak tanpa animasi jauh
+                if (prev == null || abs(prev.first - m.latitude) > 0.05 || abs(prev.second - m.longitude) > 0.05) {
+                    m.uid to (m.latitude to m.longitude)
+                } else {
+                    m.uid to prev
+                }
+            }
+
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1500L
+                interpolator = DecelerateInterpolator()
+                addUpdateListener { anim ->
+                    val fraction = anim.animatedValue as Float
+                    val interpolatedList = targetMembers.map { m ->
+                        val (sLat, sLng) = startSnapshot[m.uid] ?: (m.latitude to m.longitude)
+                        val curLat = sLat + (m.latitude - sLat) * fraction
+                        val curLng = sLng + (m.longitude - sLng) * fraction
+                        renderedCoords[m.uid] = curLat to curLng
+                        m.copy(latitude = curLat, longitude = curLng)
+                    }
+                    MapMarkerHelper.updateMembers(map, interpolatedList)
+                }
+                start()
+            }
+            activePinAnimator = animator
+        }
+
+        onDispose {
+            activePinAnimator?.cancel()
+        }
+    }
+
+    LaunchedEffect(uiState.safePlaces, uiState.activeHistoryRoute, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
-        MapMarkerHelper.updateMembers(map, uiState.members)
         MapMarkerHelper.updateSafePlaces(map, uiState.safePlaces)
         MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
