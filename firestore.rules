@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isFamilyMember(familyId) {
+      return isSignedIn() &&
+        request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.memberIds;
+    }
+
+    // Profil pengguna: semua ahli log masuk boleh baca profil asas, tetapi hanya pemilik boleh ubah
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Kumpulan keluarga: pengguna log masuk boleh cari guna kod jemputan & sertai
+    match /families/{familyId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      // Lokasi masa nyata tersulit: hanya ahli keluarga yang sah boleh baca/tulis
+      match /locations/{userId} {
+        allow read: if isFamilyMember(familyId);
+        allow write: if isFamilyMember(familyId) && request.auth.uid == userId;
+      }
+
+      // Zon selamat (Geofence): hanya ahli keluarga boleh baca/cipta/padam
+      match /places/{placeId} {
+        allow read, write: if isFamilyMember(familyId);
+      }
+
+      // Amaran kecemasan SOS: hanya ahli keluarga boleh hantar & baca
+      match /alerts/{alertId} {
+        allow read, create: if isFamilyMember(familyId);
+      }
+    }
+  }
+}
