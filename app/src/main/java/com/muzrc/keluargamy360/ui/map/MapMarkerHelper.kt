@@ -33,7 +33,6 @@ object MapMarkerHelper {
     private const val MEMBERS_SOURCE_ID = "keluargamy360-members-source"
     private const val MEMBERS_SYMBOL_LAYER_ID = "keluargamy360-members-symbol"
 
-    // Cache tandatangan lencana supaya animasi 60fps tidak menjana semula Bitmap berulang kali
     private val badgeSignatureCache = mutableMapOf<String, String>()
 
     fun setupLayers(style: Style) {

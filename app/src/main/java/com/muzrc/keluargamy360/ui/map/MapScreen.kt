@@ -38,6 +38,39 @@ import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import kotlin.math.abs
 
+private const val SATELLITE_STYLE_JSON = """
+{
+  "version": 8,
+  "sources": {
+    "esri-satellite": {
+      "type": "raster",
+      "tiles": [
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+      ],
+      "tileSize": 256,
+      "attribution": "Esri, Maxar, Earthstar Geographics"
+    }
+  },
+  "layers": [
+    {
+      "id": "esri-satellite-layer",
+      "type": "raster",
+      "source": "esri-satellite",
+      "minzoom": 0,
+      "maxzoom": 19
+    }
+  ]
+}
+"""
+
+private fun buildMapStyle(mode: Int): Style.Builder {
+    return when (mode) {
+        1 -> Style.Builder().fromUri("https://tiles.openfreemap.org/styles/dark")
+        2 -> Style.Builder().fromJson(SATELLITE_STYLE_JSON)
+        else -> Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(
@@ -50,7 +83,7 @@ fun MapScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
-    var isDarkMap by remember { mutableStateOf(false) }
+    var mapStyleMode by remember { mutableIntStateOf(0) }
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     var hideBatteryBanner by remember { mutableStateOf(false) }
@@ -100,7 +133,6 @@ fun MapScreen(
         }
     }
 
-    // Animasi pergerakan pin meluncur lancar di atas jalan setiap kali koordinat baharu tiba
     DisposableEffect(uiState.members, mapLibreMap) {
         val map = mapLibreMap
         val targetMembers = uiState.members
@@ -301,7 +333,7 @@ fun MapScreen(
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
-                            map.setStyle(Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")) { style ->
+                            map.setStyle(buildMapStyle(mapStyleMode)) { style ->
                                 MapMarkerHelper.setupLayers(style)
                                 mapLibreMap = map
                                 MapMarkerHelper.updateMembers(map, uiState.members)
@@ -343,9 +375,15 @@ fun MapScreen(
 
                 SmallFloatingActionButton(
                     onClick = {
-                        isDarkMap = !isDarkMap
-                        val url = if (isDarkMap) "https://tiles.openfreemap.org/styles/dark" else "https://tiles.openfreemap.org/styles/liberty"
-                        mapLibreMap?.setStyle(Style.Builder().fromUri(url)) { style ->
+                        mapStyleMode = (mapStyleMode + 1) % 3
+                        val modeLabel = when (mapStyleMode) {
+                            1 -> "Mod Peta: Gelap"
+                            2 -> "Mod Peta: Satelit"
+                            else -> "Mod Peta: Cerah"
+                        }
+                        Toast.makeText(context, modeLabel, Toast.LENGTH_SHORT).show()
+
+                        mapLibreMap?.setStyle(buildMapStyle(mapStyleMode)) { style ->
                             MapMarkerHelper.setupLayers(style)
                             mapLibreMap?.let {
                                 MapMarkerHelper.updateMembers(it, uiState.members)
@@ -356,7 +394,12 @@ fun MapScreen(
                     },
                     modifier = Modifier.align(Alignment.TopEnd).padding(14.dp)
                 ) {
-                    Icon(if (isDarkMap) Icons.Default.LightMode else Icons.Default.DarkMode, "Tema Peta")
+                    val styleIcon = when (mapStyleMode) {
+                        0 -> Icons.Default.DarkMode
+                        1 -> Icons.Default.SatelliteAlt
+                        else -> Icons.Default.LightMode
+                    }
+                    Icon(styleIcon, "Tukar Jenis Peta")
                 }
 
                 SmallFloatingActionButton(
