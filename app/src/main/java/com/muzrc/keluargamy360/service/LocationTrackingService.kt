@@ -29,6 +29,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -42,6 +44,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val uploadMutex = Mutex()
     private lateinit var secureStorage: SecureStorage
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
@@ -98,7 +101,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                     lastMovementTimeMs = now
                 }
 
-                // 2. Kira kelajuan hanya jika pergerakan sahih (elak 9 km/j palsu dalam rumah)
+                // 2. Kira kelajuan hanya jika pergerakan sahih
                 val calculatedSpeedKmh = if (prevLoc != null && isAccurateFix && movedDistance >= max(35f, driftThreshold)) {
                     (movedDistance / elapsedSec) * 3.6f
                 } else {
@@ -122,10 +125,12 @@ class LocationTrackingService : Service(), SensorEventListener {
                     if (!sentLowBatteryAlert) {
                         sentLowBatteryAlert = true
                         serviceScope.launch {
-                            locationRepository.postFamilyAlert(
-                                type = "BATTERY",
-                                message = "Amaran Bateri: Bateri telefon $userName tinggal ${battery.level}%!"
-                            )
+                            withTimeoutOrNull(4000L) {
+                                locationRepository.postFamilyAlert(
+                                    type = "BATTERY",
+                                    message = "Amaran Bateri: Bateri telefon $userName tinggal ${battery.level}%!"
+                                )
+                            }
                         }
                     }
                 } else if (battery.level >= 20 || battery.isCharging) {
@@ -138,10 +143,12 @@ class LocationTrackingService : Service(), SensorEventListener {
                     if (now - lastSpeedAlertTimeMs > 600_000L) {
                         lastSpeedAlertTimeMs = now
                         serviceScope.launch {
-                            locationRepository.postFamilyAlert(
-                                type = "SPEED",
-                                message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had: ${speedLimit.roundToInt()} km/j)."
-                            )
+                            withTimeoutOrNull(4000L) {
+                                locationRepository.postFamilyAlert(
+                                    type = "SPEED",
+                                    message = "Amaran Had Laju: $userName memandu pada kelajuan ${speedKmh.roundToInt()} km/j (Had: ${speedLimit.roundToInt()} km/j)."
+                                )
+                            }
                         }
                     }
                 }
@@ -158,15 +165,15 @@ class LocationTrackingService : Service(), SensorEventListener {
                     restartLocationUpdates()
                 }
 
-                // 7. Muat naik ke Firestore: segera bila pergerakan sahih, atau heartbeat 5 minit bila pegun
+                // 7. Muat naik ke Firestore dengan Mutex & Timeout 4.5s supaya tidak menimbun bila VPN/line sangkut
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
                 val shouldUpload = prevLoc == null ||
                         (hasRealDisplacement || hasRealGpsSpeed) ||
                         elapsedSinceLastUpload >= HEARTBEAT_INTERVAL_MS
 
                 if (!shouldUpload) return
+                if (!uploadMutex.tryLock()) return
 
-                // Jika pegun (heartbeat), kekalkan koordinat asal supaya pin tidak bergetar di peta
                 val uploadLat = if (isMovingNow) loc.latitude else (prevLoc?.latitude ?: loc.latitude)
                 val uploadLng = if (isMovingNow) loc.longitude else (prevLoc?.longitude ?: loc.longitude)
 
@@ -176,20 +183,26 @@ class LocationTrackingService : Service(), SensorEventListener {
                 lastUploadTimeMs = now
 
                 serviceScope.launch {
-                    locationRepository.uploadEncryptedLocation(
-                        latitude = uploadLat,
-                        longitude = uploadLng,
-                        speedKmh = speedKmh,
-                        batteryLevel = battery.level,
-                        isCharging = battery.isCharging
-                    )
+                    try {
+                        withTimeoutOrNull(4500L) {
+                            locationRepository.uploadEncryptedLocation(
+                                latitude = uploadLat,
+                                longitude = uploadLng,
+                                speedKmh = speedKmh,
+                                batteryLevel = battery.level,
+                                isCharging = battery.isCharging
+                            )
 
-                    if (isMovingNow) {
-                        val prevHist = lastHistoryLocation
-                        if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
-                            lastHistoryLocation = loc
-                            locationRepository.appendHistoryPoint(uploadLat, uploadLng)
+                            if (isMovingNow) {
+                                val prevHist = lastHistoryLocation
+                                if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
+                                    lastHistoryLocation = loc
+                                    locationRepository.appendHistoryPoint(uploadLat, uploadLng)
+                                }
+                            }
                         }
+                    } finally {
+                        uploadMutex.unlock()
                     }
                 }
             }
