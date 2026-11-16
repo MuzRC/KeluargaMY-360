@@ -33,6 +33,7 @@ import com.muzrc.keluargamy360.ui.places.PlacesScreen
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
+import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
@@ -623,6 +624,20 @@ fun MainDashboardScreen(
                                         )
                                     }
                                     Row {
+                                        IconButton(onClick = {
+                                            val bat = BatteryHelper.getBatteryStatus(context)
+                                            AppBatteryLogHelper.logAppUsageCheckpoint(
+                                                context = context,
+                                                reason = "Semakan Manual",
+                                                profileName = if (uiState.isTrackingEnabled) "AKTIF" else "DIMATIKAN",
+                                                phoneBatteryLevel = bat.level,
+                                                isCharging = bat.isCharging
+                                            )
+                                            appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                            Toast.makeText(context, "Rekod bateri app disimpan!", Toast.LENGTH_SHORT).show()
+                                        }) {
+                                            Icon(Icons.Default.AddCircleOutline, contentDescription = "Rekod Sekarang", tint = MaterialTheme.colorScheme.primary)
+                                        }
                                         IconButton(onClick = {
                                             appBatteryLogs = AppBatteryLogHelper.readLogs(context)
                                             Toast.makeText(context, "Log bateri disegar semula.", Toast.LENGTH_SHORT).show()
