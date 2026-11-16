@@ -540,12 +540,14 @@ class MapViewModel(
                 .setRequestId(place.name)
                 .setCircularRegion(place.latitude, place.longitude, place.radiusMeters)
                 .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setNotificationResponsiveness(15_000)
                 .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_EXIT)
                 .build()
         }
 
+        // Set initialTrigger = 0 supaya tidak membunyikan notifikasi palsu setiap kali aplikasi dibuka
         val request = GeofencingRequest.Builder()
-            .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
+            .setInitialTrigger(0)
             .addGeofences(geofences)
             .build()
 
