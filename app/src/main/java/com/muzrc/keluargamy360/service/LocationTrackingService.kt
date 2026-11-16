@@ -25,6 +25,7 @@ import com.muzrc.keluargamy360.MainActivity
 import com.muzrc.keluargamy360.R
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.LocationRepository
+import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.PermissionHelper
@@ -70,6 +71,10 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastSpeedKmh: Float = 0f
     private var currentProfile: PowerProfile = PowerProfile.MOVING_HIGH_BATTERY
 
+    private var lastBatteryLogTimeMs: Long = 0L
+    private var lastLoggedBatteryLevel: Int = -1
+    private var lastLoggedChargingState: Boolean? = null
+
     private var motionShakeCount = 0
     private var firstMotionShakeMs = 0L
 
@@ -82,6 +87,8 @@ class LocationTrackingService : Service(), SensorEventListener {
         secureStorage = SecureStorage(this)
         locationRepository = LocationRepository(secureStorage)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        AppBatteryLogHelper.initBaseline()
+        lastBatteryLogTimeMs = System.currentTimeMillis()
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -91,6 +98,12 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val loc = result.lastLocation ?: return
                 val now = System.currentTimeMillis()
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
+
+                // Rekod aktiviti GPS khusus app kita mengikut ketepatan semasa
+                val isHighAccProfile = currentProfile == PowerProfile.MOVING_CHARGING ||
+                        currentProfile == PowerProfile.MOVING_HIGH_BATTERY ||
+                        currentProfile == PowerProfile.MOVING_MEDIUM_BATTERY
+                AppBatteryLogHelper.recordGpsFix(isHighAccuracy = isHighAccProfile)
 
                 val prevLoc = lastUploadedLocation
                 val movedDistance = prevLoc?.distanceTo(loc) ?: Float.MAX_VALUE
@@ -174,9 +187,21 @@ class LocationTrackingService : Service(), SensorEventListener {
                     batteryLevel = battery.level,
                     isCharging = battery.isCharging
                 )
-                if (targetProfile != currentProfile) {
+
+                val profileChanged = targetProfile != currentProfile
+                if (profileChanged) {
+                    AppBatteryLogHelper.logAppUsageCheckpoint(
+                        context = this@LocationTrackingService,
+                        reason = "Tukar Mod -> ${targetProfile.name}",
+                        profileName = currentProfile.name,
+                        phoneBatteryLevel = battery.level,
+                        isCharging = battery.isCharging
+                    )
+                    lastBatteryLogTimeMs = now
                     currentProfile = targetProfile
                     restartLocationUpdates()
+                } else {
+                    evaluatePeriodicAppBatteryLog(now, battery.level, battery.isCharging)
                 }
 
                 // 6. Hidupkan sensor pecutan semasa memandu >= 25 km/j (impak) ATAU semasa tidur (bangun pantas)
@@ -215,6 +240,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                                 batteryLevel = battery.level,
                                 isCharging = battery.isCharging
                             )
+                            AppBatteryLogHelper.recordFirestoreUpload()
 
                             if (isMovingNow) {
                                 val prevHist = lastHistoryLocation
@@ -226,6 +252,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                                 if (prevHist == null || prevHist.distanceTo(loc) >= histStepMeters) {
                                     lastHistoryLocation = loc
                                     locationRepository.appendHistoryPoint(uploadLat, uploadLng)
+                                    AppBatteryLogHelper.recordFirestoreUpload()
                                 }
                             }
                         }
@@ -234,6 +261,36 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
             }
+        }
+    }
+
+    private fun evaluatePeriodicAppBatteryLog(now: Long, batteryLevel: Int, isCharging: Boolean) {
+        if (lastLoggedBatteryLevel == -1) {
+            lastLoggedBatteryLevel = batteryLevel
+            lastLoggedChargingState = isCharging
+            return
+        }
+
+        val chargingChanged = lastLoggedChargingState != null && lastLoggedChargingState != isCharging
+        val batteryStepReached = abs(batteryLevel - lastLoggedBatteryLevel) >= 5
+        val periodicIntervalReached = (now - lastBatteryLogTimeMs) >= APP_BATTERY_LOG_INTERVAL_MS
+
+        if (chargingChanged || batteryStepReached || periodicIntervalReached) {
+            val reason = when {
+                chargingChanged -> if (isCharging) "Mula Mengecas" else "Cabut Pengecas"
+                batteryStepReached -> "Perubahan 5% Bateri"
+                else -> "Laporan 30 Minit"
+            }
+            AppBatteryLogHelper.logAppUsageCheckpoint(
+                context = this,
+                reason = reason,
+                profileName = currentProfile.name,
+                phoneBatteryLevel = batteryLevel,
+                isCharging = isCharging
+            )
+            lastBatteryLogTimeMs = now
+            lastLoggedBatteryLevel = batteryLevel
+            lastLoggedChargingState = isCharging
         }
     }
 
@@ -392,6 +449,14 @@ class LocationTrackingService : Service(), SensorEventListener {
                         isCharging = battery.isCharging
                     )
                     if (wakeProfile != currentProfile) {
+                        AppBatteryLogHelper.logAppUsageCheckpoint(
+                            context = this,
+                            reason = "Bangun Pergerakan -> ${wakeProfile.name}",
+                            profileName = currentProfile.name,
+                            phoneBatteryLevel = battery.level,
+                            isCharging = battery.isCharging
+                        )
+                        lastBatteryLogTimeMs = now
                         currentProfile = wakeProfile
                         restartLocationUpdates()
                     }
@@ -470,6 +535,14 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        val battery = BatteryHelper.getBatteryStatus(this)
+        AppBatteryLogHelper.logAppUsageCheckpoint(
+            context = this,
+            reason = "Servis Dihentikan",
+            profileName = currentProfile.name,
+            phoneBatteryLevel = battery.level,
+            isCharging = battery.isCharging
+        )
         updateSensorState(false)
         fusedLocationClient.removeLocationUpdates(locationCallback)
         serviceScope.cancel()
@@ -490,6 +563,7 @@ class LocationTrackingService : Service(), SensorEventListener {
         private const val IDLE_THRESHOLD_MS = 120_000L              // Masuk mod tidur selepas 2 minit pegun
         private const val HEARTBEAT_NORMAL_MS = 300_000L            // Hantar status pegun setiap 5 minit
         private const val HEARTBEAT_LOW_BATTERY_MS = 600_000L       // Hantar status pegun setiap 10 minit (<20%)
+        private const val APP_BATTERY_LOG_INTERVAL_MS = 1_800_000L  // Rekod statistik tenaga app setiap 30 minit
         private const val MIN_DISPLACEMENT_METERS = 25f             // Abaikan getaran GPS bawah 25 meter
 
         fun start(context: Context) {
