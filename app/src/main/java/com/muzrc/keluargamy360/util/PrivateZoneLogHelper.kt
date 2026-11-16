@@ -50,9 +50,7 @@ object PrivateZoneLogHelper {
                 } else {
                     existingLines
                 }
-                file.writeText(trimmed.joinToString("
-") + "
-")
+                file.writeText(trimmed.joinToString("\n") + "\n")
             } catch (_: Exception) {
             }
         }

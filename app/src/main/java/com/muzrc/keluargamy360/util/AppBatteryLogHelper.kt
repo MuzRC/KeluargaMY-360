@@ -162,9 +162,7 @@ object AppBatteryLogHelper {
                 } else {
                     existingLines
                 }
-                file.writeText(trimmed.joinToString("
-") + "
-")
+                file.writeText(trimmed.joinToString("\n") + "\n")
 
                 // Tetapkan semula penanda aras untuk selang seterusnya
                 lastSnapshotElapsedMs = nowElapsed
