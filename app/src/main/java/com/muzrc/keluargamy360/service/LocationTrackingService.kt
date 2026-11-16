@@ -1,11 +1,13 @@
 package com.muzrc.keluargamy360.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -13,7 +15,9 @@ import android.hardware.SensorManager
 import android.location.Location
 import android.os.IBinder
 import android.os.Looper
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.google.android.gms.location.*
 import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.KeluargaApp
@@ -24,6 +28,7 @@ import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.PermissionHelper
+import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -90,6 +95,11 @@ class LocationTrackingService : Service(), SensorEventListener {
                     max(MIN_DISPLACEMENT_METERS, loc.accuracy * 1.3f)
                 } else {
                     MIN_DISPLACEMENT_METERS
+                }
+
+                // 1b. Sandaran pengesan Zon Peribadi menggunakan koordinat GPS (tulis ke .txt tempatan)
+                if (isAccurateFix) {
+                    evaluatePrivateZonesByGps(loc, now)
                 }
 
                 val gpsSpeedKmh = if (loc.hasSpeed()) (loc.speed * 3.6f).coerceAtLeast(0f) else 0f
@@ -207,6 +217,92 @@ class LocationTrackingService : Service(), SensorEventListener {
                 }
             }
         }
+    }
+
+    private fun evaluatePrivateZonesByGps(loc: Location, now: Long) {
+        val privatePlaces = secureStorage.getPrivatePlaces()
+        if (privatePlaces.isEmpty()) return
+
+        val statePrefs = getSharedPreferences("keluargamy360_private_zone_state", Context.MODE_PRIVATE)
+        val cooldownPrefs = getSharedPreferences("keluargamy360_geofence_cooldown", Context.MODE_PRIVATE)
+        val distanceResult = FloatArray(1)
+
+        for (place in privatePlaces) {
+            Location.distanceBetween(
+                loc.latitude,
+                loc.longitude,
+                place.latitude,
+                place.longitude,
+                distanceResult
+            )
+            val dist = distanceResult[0]
+            val stateKey = "inside_${place.placeId}"
+            val hasInitialState = statePrefs.contains(stateKey)
+
+            // Penampan histeresis 25m supaya isyarat di sempadan tidak berulang-alik
+            val isInsideNow = if (hasInitialState && statePrefs.getBoolean(stateKey, false)) {
+                dist <= (place.radiusMeters + 25f)
+            } else {
+                dist <= place.radiusMeters
+            }
+
+            if (!hasInitialState) {
+                statePrefs.edit().putBoolean(stateKey, isInsideNow).apply()
+                continue
+            }
+
+            val wasInside = statePrefs.getBoolean(stateKey, false)
+            if (isInsideNow != wasInside) {
+                val transitionCode = if (isInsideNow) {
+                    Geofence.GEOFENCE_TRANSITION_ENTER
+                } else {
+                    Geofence.GEOFENCE_TRANSITION_EXIT
+                }
+                val cooldownKey = "${place.name}_$transitionCode"
+                val lastTriggered = cooldownPrefs.getLong(cooldownKey, 0L)
+
+                statePrefs.edit().putBoolean(stateKey, isInsideNow).apply()
+
+                if (now - lastTriggered >= 600_000L) {
+                    cooldownPrefs.edit().putLong(cooldownKey, now).apply()
+                    PrivateZoneLogHelper.appendEvent(this, place.name, isInsideNow)
+                    val msg = if (isInsideNow) {
+                        "Anda telah tiba di zon peribadi: ${place.name}."
+                    } else {
+                        "Anda telah keluar dari zon peribadi: ${place.name}."
+                    }
+                    showPrivateZoneNotification(place.name, msg)
+                }
+            }
+        }
+    }
+
+    private fun showPrivateZoneNotification(title: String, body: String) {
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        val openIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            title.hashCode(),
+            openIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, KeluargaApp.CHANNEL_GEOFENCE_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_map)
+            .setContentTitle("Zon Peribadi: $title")
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        NotificationManagerCompat.from(this).notify(title.hashCode(), notification)
     }
 
     private fun updateCrashSensorState(enable: Boolean) {

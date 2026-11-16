@@ -16,6 +16,7 @@ import com.muzrc.keluargamy360.KeluargaApp
 import com.muzrc.keluargamy360.MainActivity
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.LocationRepository
+import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,11 +28,17 @@ class GeofenceReceiver : BroadcastReceiver() {
         if (geofencingEvent.hasError()) return
 
         val transition = geofencingEvent.geofenceTransition
+        if (transition != Geofence.GEOFENCE_TRANSITION_ENTER &&
+            transition != Geofence.GEOFENCE_TRANSITION_EXIT
+        ) return
+
+        val isEnter = transition == Geofence.GEOFENCE_TRANSITION_ENTER
         val triggeringGeofences = geofencingEvent.triggeringGeofences ?: return
         val secureStorage = SecureStorage(context)
         val locationRepo = LocationRepository(secureStorage)
         val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
         val cooldownPrefs = context.getSharedPreferences("keluargamy360_geofence_cooldown", Context.MODE_PRIVATE)
+        val statePrefs = context.getSharedPreferences("keluargamy360_private_zone_state", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
 
         for (geofence in triggeringGeofences) {
@@ -43,22 +50,25 @@ class GeofenceReceiver : BroadcastReceiver() {
             if (now - lastTriggered < 600_000L) continue
             cooldownPrefs.edit().putLong(eventKey, now).apply()
 
-            val localMsg = when (transition) {
-                Geofence.GEOFENCE_TRANSITION_ENTER -> "Anda telah tiba di zon selamat: $placeName."
-                Geofence.GEOFENCE_TRANSITION_EXIT -> "Anda telah keluar dari zon selamat: $placeName."
-                else -> continue
+            val localMsg = if (isEnter) {
+                "Anda telah tiba di zon selamat: $placeName."
+            } else {
+                "Anda telah keluar dari zon selamat: $placeName."
             }
-            val familyMsg = when (transition) {
-                Geofence.GEOFENCE_TRANSITION_ENTER -> "$userName telah tiba di zon $placeName."
-                Geofence.GEOFENCE_TRANSITION_EXIT -> "$userName telah keluar dari zon $placeName."
-                else -> continue
+            val familyMsg = if (isEnter) {
+                "$userName telah tiba di zon $placeName."
+            } else {
+                "$userName telah keluar dari zon $placeName."
             }
 
             showGeofenceNotification(context, placeName, localMsg)
 
-            // Rekod ke Log Aktiviti Keluarga jika ia bukan zon peribadi
-            val isPrivate = secureStorage.getPrivatePlaces().any { it.name == placeName }
-            if (!isPrivate) {
+            val privatePlace = secureStorage.getPrivatePlaces().find { it.name == placeName }
+            if (privatePlace != null) {
+                // Rekod terus ke fail .txt tempatan (tidak dihantar ke pelayan keluarga)
+                statePrefs.edit().putBoolean("inside_${privatePlace.placeId}", isEnter).apply()
+                PrivateZoneLogHelper.appendEvent(context, placeName, isEnter)
+            } else {
                 val pendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
