@@ -5,8 +5,10 @@ import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.location.Location
 import android.os.Build
-import android.view.animation.DecelerateInterpolator
+import android.os.SystemClock
+import android.view.animation.LinearInterpolator
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,7 +39,6 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
-import kotlin.math.abs
 
 private const val SATELLITE_STYLE_JSON = """
 {
@@ -72,6 +73,14 @@ private fun buildMapStyle(mode: Int): Style.Builder {
     }
 }
 
+private data class MemberAnimPlan(
+    val startLat: Double,
+    val startLng: Double,
+    val targetLat: Double,
+    val targetLng: Double,
+    val durationMs: Long
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(
@@ -95,8 +104,16 @@ fun MapScreen(
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
     }
 
+    // Keadaan interpolasi masa nyata bagi setiap ahli
     val renderedCoords = remember { mutableMapOf<String, Pair<Double, Double>>() }
+    val lastTargetCoords = remember { mutableMapOf<String, Pair<Double, Double>>() }
+    val lastCoordArrivalMs = remember { mutableMapOf<String, Long>() }
     var activePinAnimator by remember { mutableStateOf<ValueAnimator?>(null) }
+    var isCameraFollowing by remember { mutableStateOf(true) }
+
+    val latestMembers by rememberUpdatedState(uiState.members)
+    val latestSelectedUid by rememberUpdatedState(uiState.selectedMember?.uid)
+    val latestIsFollowing by rememberUpdatedState(isCameraFollowing)
 
     val bgPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -137,39 +154,134 @@ fun MapScreen(
         }
     }
 
-    DisposableEffect(uiState.members, mapLibreMap) {
+    // Hanya cetuskan animasi apabila koordinat (lat, lng) berubah—elak terbatal bila alamat dikemas kini
+    val coordSignature = remember(uiState.members) {
+        uiState.members.map { "${it.uid}:${it.latitude}:${it.longitude}" }
+    }
+
+    DisposableEffect(coordSignature, mapLibreMap) {
         val map = mapLibreMap
-        val targetMembers = uiState.members
+        val targetMembers = latestMembers
 
         if (map != null && targetMembers.isNotEmpty()) {
             activePinAnimator?.cancel()
 
-            val startSnapshot = targetMembers.associate { m ->
-                val prev = renderedCoords[m.uid]
-                if (prev == null || abs(prev.first - m.latitude) > 0.05 || abs(prev.second - m.longitude) > 0.05) {
-                    m.uid to (m.latitude to m.longitude)
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val distBuffer = FloatArray(1)
+
+            val animPlans = targetMembers.associate { m ->
+                val prevRendered = renderedCoords[m.uid]
+                val prevTarget = lastTargetCoords[m.uid]
+                val targetPair = m.latitude to m.longitude
+
+                val isNewCoordinate = prevTarget == null || prevTarget != targetPair
+                val prevArrival = lastCoordArrivalMs[m.uid] ?: nowElapsed
+                val arrivalDeltaMs = if (isNewCoordinate) {
+                    lastTargetCoords[m.uid] = targetPair
+                    lastCoordArrivalMs[m.uid] = nowElapsed
+                    (nowElapsed - prevArrival).coerceIn(2000L, 12000L)
                 } else {
-                    m.uid to prev
+                    4000L
+                }
+
+                if (prevRendered == null) {
+                    m.uid to MemberAnimPlan(m.latitude, m.longitude, m.latitude, m.longitude, 0L)
+                } else {
+                    Location.distanceBetween(
+                        prevRendered.first,
+                        prevRendered.second,
+                        m.latitude,
+                        m.longitude,
+                        distBuffer
+                    )
+                    val distanceMeters = distBuffer[0]
+
+                    when {
+                        // Lompatan terlalu jauh (> 5 km) atau pegun (< 1.5 m): terus ke titik akhir
+                        distanceMeters > 5000f || distanceMeters < 1.5f -> {
+                            m.uid to MemberAnimPlan(m.latitude, m.longitude, m.latitude, m.longitude, 0L)
+                        }
+                        // Kelajuan diketahui: padankan tempoh luncuran dengan kelajuan sebenar kenderaan
+                        m.speedKmh > 3f -> {
+                            val speedMps = (m.speedKmh / 3.6f).coerceAtLeast(1f)
+                            val physicsDurationMs = ((distanceMeters / speedMps) * 1000f).toLong()
+                            val smoothDuration = maxOf(physicsDurationMs, arrivalDeltaMs).coerceIn(2500L, 10000L)
+                            m.uid to MemberAnimPlan(
+                                startLat = prevRendered.first,
+                                startLng = prevRendered.second,
+                                targetLat = m.latitude,
+                                targetLng = m.longitude,
+                                durationMs = smoothDuration
+                            )
+                        }
+                        else -> {
+                            val smoothDuration = arrivalDeltaMs.coerceIn(2500L, 8000L)
+                            m.uid to MemberAnimPlan(
+                                startLat = prevRendered.first,
+                                startLng = prevRendered.second,
+                                targetLat = m.latitude,
+                                targetLng = m.longitude,
+                                durationMs = smoothDuration
+                            )
+                        }
+                    }
                 }
             }
 
-            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 1500L
-                interpolator = DecelerateInterpolator()
-                addUpdateListener { anim ->
-                    val fraction = anim.animatedValue as Float
-                    val interpolatedList = targetMembers.map { m ->
-                        val (sLat, sLng) = startSnapshot[m.uid] ?: (m.latitude to m.longitude)
-                        val curLat = sLat + (m.latitude - sLat) * fraction
-                        val curLng = sLng + (m.longitude - sLng) * fraction
-                        renderedCoords[m.uid] = curLat to curLng
-                        m.copy(latitude = curLat, longitude = curLng)
-                    }
-                    MapMarkerHelper.updateMembers(map, interpolatedList)
+            val maxDuration = animPlans.values.maxOfOrNull { it.durationMs } ?: 0L
+
+            if (maxDuration <= 0L) {
+                targetMembers.forEach { m ->
+                    renderedCoords[m.uid] = m.latitude to m.longitude
                 }
-                start()
+                MapMarkerHelper.updateMembers(map, targetMembers)
+                if (latestIsFollowing) {
+                    targetMembers.find { it.uid == latestSelectedUid }?.let { sel ->
+                        map.moveCamera(CameraUpdateFactory.newLatLng(LatLng(sel.latitude, sel.longitude)))
+                    }
+                }
+            } else {
+                val animator = ValueAnimator.ofLong(0L, maxDuration).apply {
+                    duration = maxDuration
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { anim ->
+                        val elapsed = anim.animatedValue as Long
+                        val currentList = latestMembers
+                        var followedLatLng: LatLng? = null
+
+                        val interpolatedList = currentList.map { m ->
+                            val plan = animPlans[m.uid]
+                            if (plan == null || plan.durationMs <= 0L) {
+                                renderedCoords[m.uid] = m.latitude to m.longitude
+                                if (m.uid == latestSelectedUid) {
+                                    followedLatLng = LatLng(m.latitude, m.longitude)
+                                }
+                                m
+                            } else {
+                                val fraction = (elapsed.toFloat() / plan.durationMs.toFloat()).coerceIn(0f, 1f)
+                                val curLat = plan.startLat + (plan.targetLat - plan.startLat) * fraction
+                                val curLng = plan.startLng + (plan.targetLng - plan.startLng) * fraction
+                                renderedCoords[m.uid] = curLat to curLng
+                                if (m.uid == latestSelectedUid) {
+                                    followedLatLng = LatLng(curLat, curLng)
+                                }
+                                m.copy(latitude = curLat, longitude = curLng)
+                            }
+                        }
+
+                        MapMarkerHelper.updateMembers(map, interpolatedList)
+
+                        // Kamera turut meluncur serentak dengan ikon ahli yang dipilih
+                        if (latestIsFollowing) {
+                            followedLatLng?.let { pos ->
+                                map.moveCamera(CameraUpdateFactory.newLatLng(pos))
+                            }
+                        }
+                    }
+                    start()
+                }
+                activePinAnimator = animator
             }
-            activePinAnimator = animator
         }
 
         onDispose {
@@ -183,17 +295,15 @@ fun MapScreen(
         MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
 
-    LaunchedEffect(
-        uiState.selectedMember?.uid,
-        uiState.selectedMember?.latitude,
-        uiState.selectedMember?.longitude,
-        mapLibreMap
-    ) {
+    // Fokus kamera hanya apabila pengguna menukar ahli yang dipilih
+    LaunchedEffect(uiState.selectedMember?.uid, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
         val target = uiState.selectedMember ?: return@LaunchedEffect
+        isCameraFollowing = true
+        val currentPos = renderedCoords[target.uid] ?: (target.latitude to target.longitude)
         map.animateCamera(
-            CameraUpdateFactory.newLatLngZoom(LatLng(target.latitude, target.longitude), 16.0),
-            1200
+            CameraUpdateFactory.newLatLngZoom(LatLng(currentPos.first, currentPos.second), 16.0),
+            900
         )
     }
 
@@ -344,6 +454,12 @@ fun MapScreen(
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
+                            // Hentikan auto-ikut jika pengguna seret peta secara manual
+                            map.addOnCameraMoveStartedListener { reason ->
+                                if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
+                                    isCameraFollowing = false
+                                }
+                            }
                             map.setStyle(buildMapStyle(mapStyleMode)) { style ->
                                 MapMarkerHelper.setupLayers(style)
                                 mapLibreMap = map
@@ -415,12 +531,22 @@ fun MapScreen(
 
                 SmallFloatingActionButton(
                     onClick = {
-                        uiState.selectedMember?.let {
-                            mapLibreMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(it.latitude, it.longitude), 16.0))
+                        isCameraFollowing = true
+                        uiState.selectedMember?.let { sel ->
+                            val pos = renderedCoords[sel.uid] ?: (sel.latitude to sel.longitude)
+                            mapLibreMap?.animateCamera(
+                                CameraUpdateFactory.newLatLngZoom(LatLng(pos.first, pos.second), 16.0),
+                                700
+                            )
                         }
                     },
                     modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp)
-                ) { Icon(Icons.Default.MyLocation, "Fokus") }
+                ) {
+                    Icon(
+                        imageVector = if (isCameraFollowing) Icons.Default.GpsFixed else Icons.Default.MyLocation,
+                        contentDescription = "Fokus"
+                    )
+                }
             }
 
             Surface(
@@ -455,7 +581,10 @@ fun MapScreen(
                                 MemberCard(
                                     member = member,
                                     isSelected = member.uid == uiState.selectedMember?.uid,
-                                    onClick = { viewModel.selectMember(member) }
+                                    onClick = {
+                                        isCameraFollowing = true
+                                        viewModel.selectMember(member)
+                                    }
                                 )
                             }
                         }
