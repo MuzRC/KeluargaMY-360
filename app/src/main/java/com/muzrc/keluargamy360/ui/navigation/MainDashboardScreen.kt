@@ -3,6 +3,8 @@ package com.muzrc.keluargamy360.ui.navigation
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,15 +24,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.muzrc.keluargamy360.BuildConfig
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.ui.map.MapScreen
 import com.muzrc.keluargamy360.ui.map.MapViewModel
 import com.muzrc.keluargamy360.ui.map.MemberCard
 import com.muzrc.keluargamy360.ui.places.PlacesScreen
+import com.muzrc.keluargamy360.util.AppUpdateHelper
+import com.muzrc.keluargamy360.util.AppUpdateResult
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -46,12 +52,17 @@ fun MainDashboardScreen(
     val uiState by mapViewModel.uiState.collectAsState()
     val crashDetected by CrashAlertBus.crashDetected.collectAsState()
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
 
     var actionTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var showEditNameDialog by remember { mutableStateOf(false) }
     var showLeaveFamilyDialog by remember { mutableStateOf(false) }
     var showClearPrivateLogDialog by remember { mutableStateOf(false) }
     var newDisplayName by remember { mutableStateOf("") }
+
+    // Status semakan kemas kini manual (GitHub Releases)
+    var isCheckingUpdate by remember { mutableStateOf(false) }
+    var availableUpdate by remember { mutableStateOf<AppUpdateResult.UpdateAvailable?>(null) }
 
     // Penapis tab Selamat: 0 = Log Keluarga (Firebase), 1 = Log Peribadi (.txt tempatan)
     var safetyLogMode by remember { mutableIntStateOf(0) }
@@ -61,6 +72,54 @@ fun MainDashboardScreen(
         if (selectedTab == 3 && safetyLogMode == 1) {
             privateLogs = PrivateZoneLogHelper.readLogs(context)
         }
+    }
+
+    // Dialog Kemas Kini Baharu Tersedia
+    availableUpdate?.let { update ->
+        AlertDialog(
+            onDismissRequest = { availableUpdate = null },
+            icon = { Icon(Icons.Default.SystemUpdate, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp)) },
+            title = {
+                Text(
+                    "Versi Baharu Tersedia (v${update.latestVersion})",
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Versi semasa anda: v${update.currentVersion}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = update.releaseNotes.take(400),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val url = update.downloadUrl
+                        availableUpdate = null
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Gagal membuka pautan muat turun.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Muat Turun APK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { availableUpdate = null }) { Text("Nanti") }
+            }
+        )
     }
 
     // Pengesan Impak Kenderaan: Kiraan undur 20 saat sebelum hantar SOS automatik
@@ -518,7 +577,7 @@ fun MainDashboardScreen(
                     }
                 }
                 4 -> {
-                    // Tab Kanan 2: Tetapan Profil, Had Keselamatan & Kumpulan
+                    // Tab Kanan 2: Tetapan Profil, Had Keselamatan, Semak Kemas Kini & Kumpulan
                     val code = uiState.familyGroup?.inviteCode ?: "-"
                     val me = uiState.members.find { it.uid == mapViewModel.currentUserId }
                     Column(
@@ -599,6 +658,62 @@ fun MainDashboardScreen(
                                         valueRange = 80f..140f,
                                         steps = 5
                                     )
+                                }
+                            }
+                        }
+
+                        // Kad Versi Aplikasi & Semak Kemas Kini Manual (GitHub Releases)
+                        Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Versi Aplikasi", style = MaterialTheme.typography.labelMedium)
+                                    Text(
+                                        "KeluargaMY360 v${BuildConfig.VERSION_NAME}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                FilledTonalButton(
+                                    enabled = !isCheckingUpdate,
+                                    onClick = {
+                                        isCheckingUpdate = true
+                                        coroutineScope.launch {
+                                            val result = AppUpdateHelper.checkForUpdates()
+                                            isCheckingUpdate = false
+                                            when (result) {
+                                                is AppUpdateResult.UpToDate -> {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Aplikasi sudah menggunakan versi terkini (v${result.currentVersion}).",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                                is AppUpdateResult.UpdateAvailable -> {
+                                                    availableUpdate = result
+                                                }
+                                                is AppUpdateResult.Error -> {
+                                                    Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    if (isCheckingUpdate) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Menyemak...")
+                                    } else {
+                                        Icon(Icons.Default.SystemUpdate, null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Semak Kemas Kini")
+                                    }
                                 }
                             }
                         }
