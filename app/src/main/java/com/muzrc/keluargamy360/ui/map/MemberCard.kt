@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryStd
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Navigation
@@ -20,6 +21,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -31,6 +33,8 @@ import coil.compose.AsyncImage
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import kotlin.math.roundToInt
 
+private const val OFFLINE_THRESHOLD_MS = 15L * 60L * 1000L // 15 minit
+
 @Composable
 fun MemberCard(
     member: DecryptedMemberLocation,
@@ -38,8 +42,17 @@ fun MemberCard(
     onClick: () -> Unit
 ) {
     val context = LocalContext.current
-    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+    val now = System.currentTimeMillis()
+    val isOffline = member.updatedAt > 0L && (now - member.updatedAt) >= OFFLINE_THRESHOLD_MS
+
+    val borderColor = when {
+        isSelected -> MaterialTheme.colorScheme.primary
+        isOffline -> Color(0xFFFFA726).copy(alpha = 0.6f)
+        else -> Color.Transparent
+    }
+
     val batteryColor = when {
+        isOffline -> MaterialTheme.colorScheme.onSurfaceVariant
         member.isCharging -> Color(0xFF4CAF50)
         member.batteryLevel <= 15 -> Color(0xFFEF5350)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -50,7 +63,7 @@ fun MemberCard(
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(if (isSelected) 2.dp else 0.dp, borderColor),
+        border = BorderStroke(if (isSelected) 2.dp else if (isOffline) 1.dp else 0.dp, borderColor),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) {
                 MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
@@ -65,31 +78,49 @@ fun MemberCard(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (member.photoUrl.isNotBlank()) {
-                AsyncImage(
-                    model = member.photoUrl,
-                    contentDescription = member.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                )
-            } else {
+            Box(contentAlignment = Alignment.BottomEnd) {
+                if (member.photoUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = member.photoUrl,
+                        contentDescription = member.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .alpha(if (isOffline) 0.65f else 1f)
+                            .clip(CircleShape)
+                            .border(
+                                2.dp,
+                                if (isOffline) Color(0xFFFFA726) else MaterialTheme.colorScheme.primary,
+                                CircleShape
+                            )
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(if (isOffline) Color(0xFF78909C) else MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = member.name.take(1).uppercase(),
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Titik status atas avatar (Oren jika luar talian > 15 minit, Hijau jika aktif)
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(13.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = member.name.take(1).uppercase(),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(if (isOffline) Color(0xFFFF9800) else Color(0xFF4CAF50))
+                )
             }
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -104,7 +135,7 @@ fun MemberCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (member.speedKmh >= 5f) {
+                    if (!isOffline && member.speedKmh >= 5f) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Icon(
                             imageVector = Icons.Default.DirectionsCar,
@@ -141,12 +172,35 @@ fun MemberCard(
                     )
                 }
 
-                Text(
-                    text = formatRelativeTime(member.updatedAt),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
+                if (isOffline) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudOff,
+                            contentDescription = "Luar talian",
+                            tint = Color(0xFFFF9800),
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Luar talian • ${formatOfflineAge(member.updatedAt)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFF9800),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                } else {
+                    Text(
+                        text = formatRelativeTime(member.updatedAt),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(6.dp))
@@ -200,5 +254,14 @@ private fun formatRelativeTime(timestamp: Long): String {
         diffSec < 3600 -> "Dikemas kini ${diffSec / 60} minit lalu"
         diffSec < 86400 -> "Dikemas kini ${diffSec / 3600} jam lalu"
         else -> "Dikemas kini ${diffSec / 86400} hari lalu"
+    }
+}
+
+private fun formatOfflineAge(timestamp: Long): String {
+    val diffMin = ((System.currentTimeMillis() - timestamp) / 60_000L).coerceAtLeast(1L)
+    return when {
+        diffMin < 60 -> "$diffMin min lalu"
+        diffMin < 1440 -> "${diffMin / 60} jam lalu"
+        else -> "${diffMin / 1440} hari lalu"
     }
 }
