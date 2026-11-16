@@ -31,9 +31,18 @@ class GeofenceReceiver : BroadcastReceiver() {
         val secureStorage = SecureStorage(context)
         val locationRepo = LocationRepository(secureStorage)
         val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
+        val cooldownPrefs = context.getSharedPreferences("keluargamy360_geofence_cooldown", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
 
         for (geofence in triggeringGeofences) {
             val placeName = geofence.requestId
+            val eventKey = "${placeName}_$transition"
+            val lastTriggered = cooldownPrefs.getLong(eventKey, 0L)
+
+            // Penampan masa 10 minit (600,000 ms) untuk elak notifikasi berulang di sempadan zon
+            if (now - lastTriggered < 600_000L) continue
+            cooldownPrefs.edit().putLong(eventKey, now).apply()
+
             val localMsg = when (transition) {
                 Geofence.GEOFENCE_TRANSITION_ENTER -> "Anda telah tiba di zon selamat: $placeName."
                 Geofence.GEOFENCE_TRANSITION_EXIT -> "Anda telah keluar dari zon selamat: $placeName."
@@ -77,11 +86,12 @@ class GeofenceReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(context, KeluargaApp.CHANNEL_SOS_ID)
+        val notification = NotificationCompat.Builder(context, KeluargaApp.CHANNEL_GEOFENCE_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_map)
             .setContentTitle("Kemas Kini Zon: $title")
             .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSilent(true)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
