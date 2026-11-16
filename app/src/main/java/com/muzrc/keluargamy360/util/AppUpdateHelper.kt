@@ -13,6 +13,7 @@ sealed class AppUpdateResult {
         val currentVersion: String,
         val latestVersion: String,
         val releaseNotes: String,
+        val apkFileName: String,
         val downloadUrl: String
     ) : AppUpdateResult()
     data class Error(val message: String) : AppUpdateResult()
@@ -22,6 +23,12 @@ object AppUpdateHelper {
 
     private const val LATEST_RELEASE_API =
         "https://api.github.com/repos/MuzRC/KeluargaMY-360/releases/latest"
+
+    private data class ApkAsset(
+        val name: String,
+        val url: String,
+        val updatedAt: String
+    )
 
     suspend fun checkForUpdates(): AppUpdateResult = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
@@ -63,25 +70,30 @@ object AppUpdateHelper {
                 "Penambahbaikan prestasi, kestabilan GPS, dan keselamatan keluarga."
             }
 
-            var apkUrl = ""
+            // Kumpul semua aset .apk dan pilih HANYA 1 fail APK rasmi yang paling baharu
+            val apkCandidates = mutableListOf<ApkAsset>()
             val assets = json.optJSONArray("assets")
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val asset = assets.getJSONObject(i)
-                    val assetName = asset.optString("name", "")
-                    if (assetName.endsWith(".apk", ignoreCase = true)) {
-                        apkUrl = asset.optString("browser_download_url", "")
-                        break
+                    val assetName = asset.optString("name", "").trim()
+                    val downloadUrl = asset.optString("browser_download_url", "").trim()
+                    val updatedAt = asset.optString("updated_at", asset.optString("created_at", ""))
+                    if (assetName.endsWith(".apk", ignoreCase = true) && downloadUrl.isNotBlank()) {
+                        apkCandidates.add(ApkAsset(name = assetName, url = downloadUrl, updatedAt = updatedAt))
                     }
                 }
             }
+
+            val selectedApk = selectSingleLatestApk(apkCandidates)
 
             if (isNewerVersion(cleanRemoteVersion, currentVersion)) {
                 AppUpdateResult.UpdateAvailable(
                     currentVersion = currentVersion,
                     latestVersion = cleanRemoteVersion,
                     releaseNotes = bodyNotes,
-                    downloadUrl = apkUrl.ifBlank { htmlUrl }
+                    apkFileName = selectedApk?.name ?: "KeluargaMY360-v$cleanRemoteVersion.apk",
+                    downloadUrl = selectedApk?.url ?: htmlUrl
                 )
             } else {
                 AppUpdateResult.UpToDate(currentVersion = currentVersion)
@@ -91,6 +103,21 @@ object AppUpdateHelper {
         } finally {
             connection?.disconnect()
         }
+    }
+
+    /**
+     * Memilih HANYA SATU fail .apk terkini:
+     * 1. Utamakan APK release rasmi (bukan debug / unsigned).
+     * 2. Susun mengikut masa kemas kini paling baharu (updated_at descending) dan ambil 1 sahaja.
+     */
+    private fun selectSingleLatestApk(candidates: List<ApkAsset>): ApkAsset? {
+        if (candidates.isEmpty()) return null
+        val signedReleaseApks = candidates.filter {
+            !it.name.contains("debug", ignoreCase = true) &&
+                !it.name.contains("unsigned", ignoreCase = true)
+        }
+        val pool = signedReleaseApks.ifEmpty { candidates }
+        return pool.sortedByDescending { it.updatedAt }.firstOrNull()
     }
 
     private fun isNewerVersion(remote: String, local: String): Boolean {

@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -65,6 +66,7 @@ fun MainDashboardScreen(
     // Status semakan kemas kini manual (GitHub Releases)
     var isCheckingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateResult.UpdateAvailable?>(null) }
+    var lastDownloadClickElapsedMs by remember { mutableLongStateOf(0L) }
 
     // Penapis tab Selamat: 0 = Log Keluarga, 1 = Zon Peribadi (.txt), 2 = Bateri App (.txt)
     var safetyLogMode by remember { mutableIntStateOf(0) }
@@ -84,8 +86,10 @@ fun MainDashboardScreen(
         }
     }
 
-    // Dialog Kemas Kini Baharu Tersedia
+    // Dialog Kemas Kini Baharu Tersedia (Hanya muat turun 1 fail APK terkini)
     availableUpdate?.let { update ->
+        var isDownloadTriggered by remember(update) { mutableStateOf(false) }
+
         AlertDialog(
             onDismissRequest = { availableUpdate = null },
             icon = { Icon(Icons.Default.SystemUpdate, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp)) },
@@ -104,6 +108,12 @@ fun MainDashboardScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
+                        "Fail terkini: ${update.apkFileName}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
                         text = update.releaseNotes.take(400),
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -111,11 +121,21 @@ fun MainDashboardScreen(
             },
             confirmButton = {
                 Button(
+                    enabled = !isDownloadTriggered,
                     onClick = {
+                        val nowElapsed = SystemClock.elapsedRealtime()
+                        if (isDownloadTriggered || (nowElapsed - lastDownloadClickElapsedMs) < 3000L) {
+                            return@Button
+                        }
+                        isDownloadTriggered = true
+                        lastDownloadClickElapsedMs = nowElapsed
                         val url = update.downloadUrl
                         availableUpdate = null
                         try {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            val downloadIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            }
+                            context.startActivity(downloadIntent)
                         } catch (_: Exception) {
                             Toast.makeText(context, "Gagal membuka pautan muat turun.", Toast.LENGTH_SHORT).show()
                         }
@@ -123,7 +143,7 @@ fun MainDashboardScreen(
                 ) {
                     Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Muat Turun APK")
+                    Text("Muat Turun 1 APK Terkini")
                 }
             },
             dismissButton = {
