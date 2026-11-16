@@ -14,6 +14,7 @@ class KeluargaApp : Application() {
     companion object {
         const val CHANNEL_TRACKING_ID = "keluargamy360_tracking"
         const val CHANNEL_SOS_ID = "keluargamy360_sos"
+        const val CHANNEL_GEOFENCE_ID = "keluargamy360_geofence"
     }
 
     override fun onCreate() {
@@ -37,7 +38,19 @@ class KeluargaApp : Application() {
                 setShowBadge(false)
             }
 
-            // 2. Saluran bunyi kuat untuk amaran SOS & Zon Selamat
+            // 2. Saluran senyap (tanpa bunyi bising) untuk kemas kini tiba/keluar Zon Selamat
+            val geofenceChannel = NotificationChannel(
+                CHANNEL_GEOFENCE_ID,
+                "Kemas Kini Zon Selamat",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Makluman senyap apabila ahli keluarga tiba atau keluar dari zon selamat."
+                enableVibration(false)
+                setSound(null, null)
+                setShowBadge(true)
+            }
+
+            // 3. Saluran bunyi kuat dikhaskan untuk amaran kecemasan SOS sahaja
             val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
@@ -58,6 +71,7 @@ class KeluargaApp : Application() {
             }
 
             manager.createNotificationChannel(trackingChannel)
+            manager.createNotificationChannel(geofenceChannel)
             manager.createNotificationChannel(sosChannel)
         }
     }
