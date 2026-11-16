@@ -30,6 +30,7 @@ import com.muzrc.keluargamy360.ui.map.MapScreen
 import com.muzrc.keluargamy360.ui.map.MapViewModel
 import com.muzrc.keluargamy360.ui.map.MemberCard
 import com.muzrc.keluargamy360.ui.places.PlacesScreen
+import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
 import com.muzrc.keluargamy360.util.CrashAlertBus
@@ -64,13 +65,17 @@ fun MainDashboardScreen(
     var isCheckingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateResult.UpdateAvailable?>(null) }
 
-    // Penapis tab Selamat: 0 = Log Keluarga (Firebase), 1 = Log Peribadi (.txt tempatan)
+    // Penapis tab Selamat: 0 = Log Keluarga, 1 = Zon Peribadi (.txt), 2 = Bateri App (.txt)
     var safetyLogMode by remember { mutableIntStateOf(0) }
     var privateLogs by remember { mutableStateOf(PrivateZoneLogHelper.readLogs(context)) }
+    var appBatteryLogs by remember { mutableStateOf(AppBatteryLogHelper.readLogs(context)) }
 
     LaunchedEffect(selectedTab, safetyLogMode) {
-        if (selectedTab == 3 && safetyLogMode == 1) {
-            privateLogs = PrivateZoneLogHelper.readLogs(context)
+        if (selectedTab == 3) {
+            when (safetyLogMode) {
+                1 -> privateLogs = PrivateZoneLogHelper.readLogs(context)
+                2 -> appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+            }
         }
     }
 
@@ -289,17 +294,32 @@ fun MainDashboardScreen(
     }
 
     if (showClearPrivateLogDialog) {
+        val isBatteryTab = safetyLogMode == 2
         AlertDialog(
             onDismissRequest = { showClearPrivateLogDialog = false },
-            title = { Text("Padam Semua Log Peribadi?") },
-            text = { Text("Fail log_zon_peribadi.txt dalam telefon anda akan dikosongkan sepenuhnya.") },
+            title = { Text(if (isBatteryTab) "Padam Semua Log Bateri App?" else "Padam Semua Log Peribadi?") },
+            text = {
+                Text(
+                    if (isBatteryTab) {
+                        "Fail log_bateri_app.txt dalam telefon anda akan dikosongkan sepenuhnya."
+                    } else {
+                        "Fail log_zon_peribadi.txt dalam telefon anda akan dikosongkan sepenuhnya."
+                    }
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {
-                        PrivateZoneLogHelper.clearLogs(context)
-                        privateLogs = emptyList()
+                        if (isBatteryTab) {
+                            AppBatteryLogHelper.clearLogs(context)
+                            appBatteryLogs = emptyList()
+                            Toast.makeText(context, "Log bateri app dikosongkan.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            PrivateZoneLogHelper.clearLogs(context)
+                            privateLogs = emptyList()
+                            Toast.makeText(context, "Log zon peribadi dikosongkan.", Toast.LENGTH_SHORT).show()
+                        }
                         showClearPrivateLogDialog = false
-                        Toast.makeText(context, "Log zon peribadi dikosongkan.", Toast.LENGTH_SHORT).show()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("Padam") }
@@ -387,7 +407,7 @@ fun MainDashboardScreen(
                     onSignOut = onSignOut
                 )
                 3 -> {
-                    // Tab Kanan 1: Daftar Masuk Selamat & Dwi-Log (Keluarga vs Peribadi .txt)
+                    // Tab Kanan 1: Daftar Masuk Selamat & 3 Sumber Log Terasing
                     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                         Card(
                             shape = RoundedCornerShape(16.dp),
@@ -417,17 +437,17 @@ fun MainDashboardScreen(
                             }
                         }
 
-                        Spacer(Modifier.height(14.dp))
+                        Spacer(Modifier.height(12.dp))
 
-                        // Penukar dua sumber log tanpa bercampur
+                        // Penukar 3 sumber log tanpa bercampur
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             SegmentedButton(
                                 selected = safetyLogMode == 0,
                                 onClick = { safetyLogMode = 0 },
-                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                                icon = { Icon(Icons.Default.Groups, null, modifier = Modifier.size(18.dp)) }
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                                icon = { Icon(Icons.Default.Groups, null, modifier = Modifier.size(16.dp)) }
                             ) {
-                                Text("Log Keluarga", fontWeight = FontWeight.SemiBold)
+                                Text("Keluarga", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             }
                             SegmentedButton(
                                 selected = safetyLogMode == 1,
@@ -435,136 +455,239 @@ fun MainDashboardScreen(
                                     safetyLogMode = 1
                                     privateLogs = PrivateZoneLogHelper.readLogs(context)
                                 },
-                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                                icon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp)) }
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                                icon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(16.dp)) }
                             ) {
-                                Text("Log Peribadi (.txt)", fontWeight = FontWeight.SemiBold)
+                                Text("Zon (.txt)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            }
+                            SegmentedButton(
+                                selected = safetyLogMode == 2,
+                                onClick = {
+                                    safetyLogMode = 2
+                                    appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                                icon = { Icon(Icons.Default.BatteryChargingFull, null, modifier = Modifier.size(16.dp)) }
+                            ) {
+                                Text("Bateri App", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             }
                         }
 
                         Spacer(Modifier.height(10.dp))
 
-                        if (safetyLogMode == 0) {
-                            // 1. LOG AKTIVITI KELUARGA (FIREBASE)
-                            Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(8.dp))
+                        when (safetyLogMode) {
+                            0 -> {
+                                // 1. LOG AKTIVITI KELUARGA (FIREBASE)
+                                Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.height(8.dp))
 
-                            if (uiState.activityLogs.isEmpty()) {
-                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text("Belum ada rekod aktiviti keluarga hari ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            } else {
-                                val formatter = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
-                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-                                    items(uiState.activityLogs, key = { it.id }) { log ->
-                                        val icon = when (log.type) {
-                                            "SOS" -> Icons.Default.Warning
-                                            "CHECKIN" -> Icons.Default.CheckCircle
-                                            "BATTERY" -> Icons.Default.BatteryAlert
-                                            "SPEED" -> Icons.Default.Speed
-                                            "GEOFENCE" -> Icons.Default.Place
-                                            "RING" -> Icons.Default.NotificationsActive
-                                            else -> Icons.Default.Info
-                                        }
-                                        Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-                                            Row(
-                                                modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-                                                Spacer(Modifier.width(12.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(log.message, style = MaterialTheme.typography.bodyMedium)
-                                                    Text(
-                                                        formatter.format(Date(log.timestamp)),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
+                                if (uiState.activityLogs.isEmpty()) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text("Belum ada rekod aktiviti keluarga hari ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                } else {
+                                    val formatter = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                        items(uiState.activityLogs, key = { it.id }) { log ->
+                                            val icon = when (log.type) {
+                                                "SOS" -> Icons.Default.Warning
+                                                "CHECKIN" -> Icons.Default.CheckCircle
+                                                "BATTERY" -> Icons.Default.BatteryAlert
+                                                "SPEED" -> Icons.Default.Speed
+                                                "GEOFENCE" -> Icons.Default.Place
+                                                "RING" -> Icons.Default.NotificationsActive
+                                                else -> Icons.Default.Info
+                                            }
+                                            Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                                                Row(
+                                                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(log.message, style = MaterialTheme.typography.bodyMedium)
+                                                        Text(
+                                                            formatter.format(Date(log.timestamp)),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            // 2. LOG ZON PERIBADI TEMPATAN (.TXT DALAM TELEFON)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("Log Zon Peribadi (.txt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                    Text(
-                                        "Disimpan dalam telefon sahaja (100% rahsia)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFF2E7D32)
-                                    )
+                            1 -> {
+                                // 2. LOG ZON PERIBADI TEMPATAN (.TXT DALAM TELEFON)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Log Zon Peribadi (.txt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            "Disimpan dalam telefon sahaja (100% rahsia)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF2E7D32)
+                                        )
+                                    }
+                                    Row {
+                                        IconButton(onClick = {
+                                            privateLogs = PrivateZoneLogHelper.readLogs(context)
+                                            Toast.makeText(context, "Log disegar semula.", Toast.LENGTH_SHORT).show()
+                                        }) {
+                                            Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
+                                        }
+                                        IconButton(onClick = {
+                                            PrivateZoneLogHelper.exportToDownloads(context)
+                                                .onSuccess { fileName ->
+                                                    Toast.makeText(context, "Disimpan ke Downloads/$fileName", Toast.LENGTH_LONG).show()
+                                                }
+                                                .onFailure { err ->
+                                                    Toast.makeText(context, err.message ?: "Gagal eksport.", Toast.LENGTH_SHORT).show()
+                                                }
+                                        }) {
+                                            Icon(Icons.Default.Download, contentDescription = "Eksport .txt", tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                        if (privateLogs.isNotEmpty()) {
+                                            IconButton(onClick = { showClearPrivateLogDialog = true }) {
+                                                Icon(Icons.Default.DeleteOutline, contentDescription = "Padam Log", tint = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                    }
                                 }
-                                Row {
-                                    IconButton(onClick = {
-                                        privateLogs = PrivateZoneLogHelper.readLogs(context)
-                                        Toast.makeText(context, "Log disegar semula.", Toast.LENGTH_SHORT).show()
-                                    }) {
-                                        Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
+
+                                Spacer(Modifier.height(6.dp))
+
+                                if (privateLogs.isEmpty()) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "Belum ada rekod masuk/keluar zon peribadi dalam log_zon_peribadi.txt.",
+                                            textAlign = TextAlign.Center,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
-                                    IconButton(onClick = {
-                                        PrivateZoneLogHelper.exportToDownloads(context)
-                                            .onSuccess { fileName ->
-                                                Toast.makeText(context, "Disimpan ke Downloads/$fileName", Toast.LENGTH_LONG).show()
+                                } else {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                        items(privateLogs) { item ->
+                                            val isEnter = item.message.startsWith("[MASUK]")
+                                            Card(
+                                                shape = RoundedCornerShape(12.dp),
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (isEnter) Icons.Default.Login else Icons.Default.Logout,
+                                                        contentDescription = null,
+                                                        tint = if (isEnter) Color(0xFF2E7D32) else Color(0xFFE65100)
+                                                    )
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(item.message, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                                        if (item.timestampText.isNotBlank()) {
+                                                            Text(
+                                                                item.timestampText,
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            )
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            .onFailure { err ->
-                                                Toast.makeText(context, err.message ?: "Gagal eksport.", Toast.LENGTH_SHORT).show()
-                                            }
-                                    }) {
-                                        Icon(Icons.Default.Download, contentDescription = "Eksport .txt", tint = MaterialTheme.colorScheme.primary)
-                                    }
-                                    if (privateLogs.isNotEmpty()) {
-                                        IconButton(onClick = { showClearPrivateLogDialog = true }) {
-                                            Icon(Icons.Default.DeleteOutline, contentDescription = "Padam Log", tint = MaterialTheme.colorScheme.error)
                                         }
                                     }
                                 }
                             }
-
-                            Spacer(Modifier.height(6.dp))
-
-                            if (privateLogs.isEmpty()) {
-                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        "Belum ada rekod masuk/keluar zon peribadi dalam log_zon_peribadi.txt.",
-                                        textAlign = TextAlign.Center,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                            2 -> {
+                                // 3. LOG PENGGUNAAN TENAGA KHUSUS PROSES KELUARGAMY360 (.TXT)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Log Bateri App (.txt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            "Ditapis khas untuk CPU, GPS & data app ini sahaja",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Row {
+                                        IconButton(onClick = {
+                                            appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                            Toast.makeText(context, "Log bateri disegar semula.", Toast.LENGTH_SHORT).show()
+                                        }) {
+                                            Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
+                                        }
+                                        IconButton(onClick = {
+                                            AppBatteryLogHelper.exportToDownloads(context)
+                                                .onSuccess { fileName ->
+                                                    Toast.makeText(context, "Disimpan ke Downloads/$fileName", Toast.LENGTH_LONG).show()
+                                                }
+                                                .onFailure { err ->
+                                                    Toast.makeText(context, err.message ?: "Gagal eksport.", Toast.LENGTH_SHORT).show()
+                                                }
+                                        }) {
+                                            Icon(Icons.Default.Download, contentDescription = "Eksport .txt", tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                        if (appBatteryLogs.isNotEmpty()) {
+                                            IconButton(onClick = { showClearPrivateLogDialog = true }) {
+                                                Icon(Icons.Default.DeleteOutline, contentDescription = "Padam Log", tint = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                    }
                                 }
-                            } else {
-                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-                                    items(privateLogs) { item ->
-                                        val isEnter = item.message.startsWith("[MASUK]")
-                                        Card(
-                                            shape = RoundedCornerShape(12.dp),
-                                            colors = CardDefaults.cardColors(
-                                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-                                            ),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
+
+                                Spacer(Modifier.height(6.dp))
+
+                                if (appBatteryLogs.isEmpty()) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "Belum ada rekod. Rekod dijana automatik setiap 30 minit, perubahan 5% bateri, atau pertukaran mod GPS.",
+                                            textAlign = TextAlign.Center,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                } else {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                        items(appBatteryLogs) { item ->
+                                            Card(
+                                                shape = RoundedCornerShape(12.dp),
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
                                             ) {
-                                                Icon(
-                                                    imageVector = if (isEnter) Icons.Default.Login else Icons.Default.Logout,
-                                                    contentDescription = null,
-                                                    tint = if (isEnter) Color(0xFF2E7D32) else Color(0xFFE65100)
-                                                )
-                                                Spacer(Modifier.width(12.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(item.message, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                                Column(modifier = Modifier.padding(12.dp).fillMaxWidth()) {
+                                                    Text(
+                                                        item.summary,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                    if (item.detail.isNotBlank()) {
+                                                        Text(
+                                                            item.detail,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            modifier = Modifier.padding(top = 2.dp)
+                                                        )
+                                                    }
                                                     if (item.timestampText.isNotBlank()) {
                                                         Text(
                                                             item.timestampText,
                                                             style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.padding(top = 4.dp)
                                                         )
                                                     }
                                                 }
