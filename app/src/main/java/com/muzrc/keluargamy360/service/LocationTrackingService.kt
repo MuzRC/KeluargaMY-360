@@ -36,6 +36,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -43,9 +44,12 @@ import kotlin.math.sqrt
 class LocationTrackingService : Service(), SensorEventListener {
 
     private enum class PowerProfile {
-        ACTIVE_MOVING,   // Sedang bergerak: GPS Satelit 15s
-        STATIONARY_IDLE, // Pegun > 2 minit: Jimat bateri 90s (tiada satelit)
-        LOW_BATTERY      // Bateri < 20%: Jimat kritikal 180s
+        MOVING_CHARGING,        // Bergerak + Dicas: Ultra-agresif GPS 5s / 10m
+        MOVING_HIGH_BATTERY,    // Bergerak + Bateri >= 50%: Agresif GPS 8s / 15m
+        MOVING_MEDIUM_BATTERY,  // Bergerak + Bateri 20%-49%: Seimbang GPS 15s / 25m
+        MOVING_LOW_BATTERY,     // Bergerak + Bateri < 20%: Jimat bergerak 40s / 40m
+        STATIONARY_NORMAL,      // Berhenti > 2 minit + Bateri >= 20%/Dicas: Tidur 2 minit
+        STATIONARY_LOW_BATTERY  // Berhenti > 2 minit + Bateri < 20%: Tidur dalam 4 minit
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -64,7 +68,10 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastUploadTimeMs: Long = 0L
     private var lastMovementTimeMs: Long = System.currentTimeMillis()
     private var lastSpeedKmh: Float = 0f
-    private var currentProfile: PowerProfile = PowerProfile.ACTIVE_MOVING
+    private var currentProfile: PowerProfile = PowerProfile.MOVING_HIGH_BATTERY
+
+    private var motionShakeCount = 0
+    private var firstMotionShakeMs = 0L
 
     private var sentLowBatteryAlert = false
     private var lastSpeedAlertTimeMs: Long = 0L
@@ -126,11 +133,7 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
 
-                // 3. Sensor kemalangan hanya aktif bila memandu >= 25 km/j
-                val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
-                updateCrashSensorState(shouldMonitorCrash)
-
-                // 4. Amaran Bateri Lemah (< 15%)
+                // 3. Amaran Bateri Lemah (< 15%)
                 if (secureStorage.isLowBatteryAlertEnabled() && battery.level < 15 && !battery.isCharging) {
                     if (!sentLowBatteryAlert) {
                         sentLowBatteryAlert = true
@@ -147,7 +150,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                     sentLowBatteryAlert = false
                 }
 
-                // 5. Amaran Had Laju
+                // 4. Amaran Had Laju
                 val speedLimit = secureStorage.getSpeedLimitKmh()
                 if (secureStorage.isSpeedAlertEnabled() && speedKmh > speedLimit) {
                     if (now - lastSpeedAlertTimeMs > 600_000L) {
@@ -163,23 +166,33 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
 
-                // 6. Tukar profil kuasa secara automatik (Tidur bila pegun > 2 minit, bangun bila bergerak)
+                // 5. Tentukan profil kuasa adaptif (Pergerakan + Tahap/Pengecasan Bateri)
                 val stationaryDuration = now - lastMovementTimeMs
-                val targetProfile = when {
-                    battery.level < 20 && !battery.isCharging -> PowerProfile.LOW_BATTERY
-                    stationaryDuration >= IDLE_THRESHOLD_MS -> PowerProfile.STATIONARY_IDLE
-                    else -> PowerProfile.ACTIVE_MOVING
-                }
+                val isStationary = stationaryDuration >= IDLE_THRESHOLD_MS
+                val targetProfile = resolveTargetProfile(
+                    isStationary = isStationary,
+                    batteryLevel = battery.level,
+                    isCharging = battery.isCharging
+                )
                 if (targetProfile != currentProfile) {
                     currentProfile = targetProfile
                     restartLocationUpdates()
                 }
 
-                // 7. Muat naik ke Firestore dengan Mutex & Timeout 4.5s supaya tidak menimbun bila VPN/line sangkut
+                // 6. Hidupkan sensor pecutan semasa memandu >= 25 km/j (impak) ATAU semasa tidur (bangun pantas)
+                val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
+                updateSensorState(shouldMonitorCrash || isStationary)
+
+                // 7. Muat naik ke Firestore dengan selang heartbeat adaptif mengikut bateri
+                val heartbeatMs = if (currentProfile == PowerProfile.STATIONARY_LOW_BATTERY) {
+                    HEARTBEAT_LOW_BATTERY_MS
+                } else {
+                    HEARTBEAT_NORMAL_MS
+                }
                 val elapsedSinceLastUpload = now - lastUploadTimeMs
                 val shouldUpload = prevLoc == null ||
                         (hasRealDisplacement || hasRealGpsSpeed) ||
-                        elapsedSinceLastUpload >= HEARTBEAT_INTERVAL_MS
+                        elapsedSinceLastUpload >= heartbeatMs
 
                 if (!shouldUpload) return
                 if (!uploadMutex.tryLock()) return
@@ -205,7 +218,12 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                             if (isMovingNow) {
                                 val prevHist = lastHistoryLocation
-                                if (prevHist == null || prevHist.distanceTo(loc) >= 80f) {
+                                val histStepMeters = when (currentProfile) {
+                                    PowerProfile.MOVING_CHARGING -> 50f
+                                    PowerProfile.MOVING_HIGH_BATTERY -> 65f
+                                    else -> 80f
+                                }
+                                if (prevHist == null || prevHist.distanceTo(loc) >= histStepMeters) {
                                     lastHistoryLocation = loc
                                     locationRepository.appendHistoryPoint(uploadLat, uploadLng)
                                 }
@@ -215,6 +233,27 @@ class LocationTrackingService : Service(), SensorEventListener {
                         uploadMutex.unlock()
                     }
                 }
+            }
+        }
+    }
+
+    private fun resolveTargetProfile(
+        isStationary: Boolean,
+        batteryLevel: Int,
+        isCharging: Boolean
+    ): PowerProfile {
+        return if (isStationary) {
+            if (batteryLevel < 20 && !isCharging) {
+                PowerProfile.STATIONARY_LOW_BATTERY
+            } else {
+                PowerProfile.STATIONARY_NORMAL
+            }
+        } else {
+            when {
+                isCharging -> PowerProfile.MOVING_CHARGING
+                batteryLevel >= 50 -> PowerProfile.MOVING_HIGH_BATTERY
+                batteryLevel >= 20 -> PowerProfile.MOVING_MEDIUM_BATTERY
+                else -> PowerProfile.MOVING_LOW_BATTERY
             }
         }
     }
@@ -305,7 +344,7 @@ class LocationTrackingService : Service(), SensorEventListener {
         NotificationManagerCompat.from(this).notify(title.hashCode(), notification)
     }
 
-    private fun updateCrashSensorState(enable: Boolean) {
+    private fun updateSensorState(enable: Boolean) {
         if (enable && !isSensorActive) {
             accelerometer?.let {
                 sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
@@ -314,6 +353,7 @@ class LocationTrackingService : Service(), SensorEventListener {
         } else if (!enable && isSensorActive) {
             sensorManager?.unregisterListener(this)
             isSensorActive = false
+            motionShakeCount = 0
         }
     }
 
@@ -323,12 +363,39 @@ class LocationTrackingService : Service(), SensorEventListener {
         val y = event.values[1]
         val z = event.values[2]
         val gForce = sqrt((x * x + y * y + z * z).toDouble()) / SensorManager.GRAVITY_EARTH
+        val now = System.currentTimeMillis()
 
-        if (gForce >= 4.5 && lastSpeedKmh >= 25f) {
-            val now = System.currentTimeMillis()
+        // 1. Pengesan impak kemalangan (>= 4.5G semasa memandu >= 25 km/j)
+        if (secureStorage.isCrashDetectionEnabled() && gForce >= 4.5 && lastSpeedKmh >= 25f) {
             if (now - lastCrashTriggerTimeMs > 60_000L) {
                 lastCrashTriggerTimeMs = now
                 CrashAlertBus.triggerCrashCountdown()
+            }
+        }
+
+        // 2. Bangun serta-merta dari mod tidur apabila pergerakan fizikal dikesan
+        val isSleeping = currentProfile == PowerProfile.STATIONARY_NORMAL ||
+                currentProfile == PowerProfile.STATIONARY_LOW_BATTERY
+        if (isSleeping && abs(gForce - 1.0) >= 0.20) {
+            if (now - firstMotionShakeMs > 2500L) {
+                firstMotionShakeMs = now
+                motionShakeCount = 1
+            } else {
+                motionShakeCount++
+                if (motionShakeCount >= 3) {
+                    motionShakeCount = 0
+                    lastMovementTimeMs = now
+                    val battery = BatteryHelper.getBatteryStatus(this)
+                    val wakeProfile = resolveTargetProfile(
+                        isStationary = false,
+                        batteryLevel = battery.level,
+                        isCharging = battery.isCharging
+                    )
+                    if (wakeProfile != currentProfile) {
+                        currentProfile = wakeProfile
+                        restartLocationUpdates()
+                    }
+                }
             }
         }
     }
@@ -338,11 +405,11 @@ class LocationTrackingService : Service(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         val battery = BatteryHelper.getBatteryStatus(this)
-        currentProfile = if (battery.level < 20 && !battery.isCharging) {
-            PowerProfile.LOW_BATTERY
-        } else {
-            PowerProfile.ACTIVE_MOVING
-        }
+        currentProfile = resolveTargetProfile(
+            isStationary = false,
+            batteryLevel = battery.level,
+            isCharging = battery.isCharging
+        )
         startLocationUpdates()
         return START_STICKY
     }
@@ -352,9 +419,18 @@ class LocationTrackingService : Service(), SensorEventListener {
         if (!PermissionHelper.hasFineLocation(this)) return
 
         val (priority, intervalMs, minUpdateMs, minDistance) = when (currentProfile) {
-            PowerProfile.ACTIVE_MOVING -> Quad(Priority.PRIORITY_HIGH_ACCURACY, 15_000L, 8_000L, MIN_DISPLACEMENT_METERS)
-            PowerProfile.STATIONARY_IDLE -> Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 90_000L, 45_000L, MIN_DISPLACEMENT_METERS)
-            PowerProfile.LOW_BATTERY -> Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 180_000L, 90_000L, 35f)
+            PowerProfile.MOVING_CHARGING ->
+                Quad(Priority.PRIORITY_HIGH_ACCURACY, 5_000L, 3_000L, 10f)
+            PowerProfile.MOVING_HIGH_BATTERY ->
+                Quad(Priority.PRIORITY_HIGH_ACCURACY, 8_000L, 5_000L, 15f)
+            PowerProfile.MOVING_MEDIUM_BATTERY ->
+                Quad(Priority.PRIORITY_HIGH_ACCURACY, 15_000L, 8_000L, MIN_DISPLACEMENT_METERS)
+            PowerProfile.MOVING_LOW_BATTERY ->
+                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 40_000L, 20_000L, 40f)
+            PowerProfile.STATIONARY_NORMAL ->
+                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 120_000L, 60_000L, MIN_DISPLACEMENT_METERS)
+            PowerProfile.STATIONARY_LOW_BATTERY ->
+                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 240_000L, 120_000L, 35f)
         }
 
         val request = LocationRequest.Builder(priority, intervalMs)
@@ -394,7 +470,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
-        updateCrashSensorState(false)
+        updateSensorState(false)
         fusedLocationClient.removeLocationUpdates(locationCallback)
         serviceScope.cancel()
         super.onDestroy()
@@ -411,9 +487,10 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
-        private const val IDLE_THRESHOLD_MS = 120_000L          // Masuk mod tidur selepas 2 minit pegun
-        private const val HEARTBEAT_INTERVAL_MS = 300_000L      // Hantar status pegun setiap 5 minit
-        private const val MIN_DISPLACEMENT_METERS = 25f         // Abaikan getaran GPS bawah 25 meter
+        private const val IDLE_THRESHOLD_MS = 120_000L              // Masuk mod tidur selepas 2 minit pegun
+        private const val HEARTBEAT_NORMAL_MS = 300_000L            // Hantar status pegun setiap 5 minit
+        private const val HEARTBEAT_LOW_BATTERY_MS = 600_000L       // Hantar status pegun setiap 10 minit (<20%)
+        private const val MIN_DISPLACEMENT_METERS = 25f             // Abaikan getaran GPS bawah 25 meter
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java)
