@@ -29,6 +29,7 @@ import com.muzrc.keluargamy360.ui.map.MemberCard
 import com.muzrc.keluargamy360.ui.places.PlacesScreen
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
+import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -49,7 +50,18 @@ fun MainDashboardScreen(
     var actionTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var showEditNameDialog by remember { mutableStateOf(false) }
     var showLeaveFamilyDialog by remember { mutableStateOf(false) }
+    var showClearPrivateLogDialog by remember { mutableStateOf(false) }
     var newDisplayName by remember { mutableStateOf("") }
+
+    // Penapis tab Selamat: 0 = Log Keluarga (Firebase), 1 = Log Peribadi (.txt tempatan)
+    var safetyLogMode by remember { mutableIntStateOf(0) }
+    var privateLogs by remember { mutableStateOf(PrivateZoneLogHelper.readLogs(context)) }
+
+    LaunchedEffect(selectedTab, safetyLogMode) {
+        if (selectedTab == 3 && safetyLogMode == 1) {
+            privateLogs = PrivateZoneLogHelper.readLogs(context)
+        }
+    }
 
     // Pengesan Impak Kenderaan: Kiraan undur 20 saat sebelum hantar SOS automatik
     if (crashDetected) {
@@ -217,6 +229,28 @@ fun MainDashboardScreen(
         )
     }
 
+    if (showClearPrivateLogDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearPrivateLogDialog = false },
+            title = { Text("Padam Semua Log Peribadi?") },
+            text = { Text("Fail log_zon_peribadi.txt dalam telefon anda akan dikosongkan sepenuhnya.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        PrivateZoneLogHelper.clearLogs(context)
+                        privateLogs = emptyList()
+                        showClearPrivateLogDialog = false
+                        Toast.makeText(context, "Log zon peribadi dikosongkan.", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Padam") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearPrivateLogDialog = false }) { Text("Batal") }
+            }
+        )
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
@@ -294,7 +328,7 @@ fun MainDashboardScreen(
                     onSignOut = onSignOut
                 )
                 3 -> {
-                    // Tab Kanan 1: Daftar Masuk Selamat & Log Aktiviti Keluarga
+                    // Tab Kanan 1: Daftar Masuk Selamat & Dwi-Log (Keluarga vs Peribadi .txt)
                     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                         Card(
                             shape = RoundedCornerShape(16.dp),
@@ -324,41 +358,157 @@ fun MainDashboardScreen(
                             }
                         }
 
-                        Spacer(Modifier.height(16.dp))
-                        Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(8.dp))
+                        Spacer(Modifier.height(14.dp))
 
-                        if (uiState.activityLogs.isEmpty()) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("Belum ada rekod aktiviti keluarga hari ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        // Penukar dua sumber log tanpa bercampur
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            SegmentedButton(
+                                selected = safetyLogMode == 0,
+                                onClick = { safetyLogMode = 0 },
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                icon = { Icon(Icons.Default.Groups, null, modifier = Modifier.size(18.dp)) }
+                            ) {
+                                Text("Log Keluarga", fontWeight = FontWeight.SemiBold)
+                            }
+                            SegmentedButton(
+                                selected = safetyLogMode == 1,
+                                onClick = {
+                                    safetyLogMode = 1
+                                    privateLogs = PrivateZoneLogHelper.readLogs(context)
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                icon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp)) }
+                            ) {
+                                Text("Log Peribadi (.txt)", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+
+                        if (safetyLogMode == 0) {
+                            // 1. LOG AKTIVITI KELUARGA (FIREBASE)
+                            Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+
+                            if (uiState.activityLogs.isEmpty()) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text("Belum ada rekod aktiviti keluarga hari ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            } else {
+                                val formatter = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
+                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                    items(uiState.activityLogs, key = { it.id }) { log ->
+                                        val icon = when (log.type) {
+                                            "SOS" -> Icons.Default.Warning
+                                            "CHECKIN" -> Icons.Default.CheckCircle
+                                            "BATTERY" -> Icons.Default.BatteryAlert
+                                            "SPEED" -> Icons.Default.Speed
+                                            "GEOFENCE" -> Icons.Default.Place
+                                            "RING" -> Icons.Default.NotificationsActive
+                                            else -> Icons.Default.Info
+                                        }
+                                        Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                                            Row(
+                                                modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+                                                Spacer(Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(log.message, style = MaterialTheme.typography.bodyMedium)
+                                                    Text(
+                                                        formatter.format(Date(log.timestamp)),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         } else {
-                            val formatter = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
-                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-                                items(uiState.activityLogs, key = { it.id }) { log ->
-                                    val icon = when (log.type) {
-                                        "SOS" -> Icons.Default.Warning
-                                        "CHECKIN" -> Icons.Default.CheckCircle
-                                        "BATTERY" -> Icons.Default.BatteryAlert
-                                        "SPEED" -> Icons.Default.Speed
-                                        "GEOFENCE" -> Icons.Default.Place
-                                        "RING" -> Icons.Default.NotificationsActive
-                                        else -> Icons.Default.Info
+                            // 2. LOG ZON PERIBADI TEMPATAN (.TXT DALAM TELEFON)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Log Zon Peribadi (.txt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "Disimpan dalam telefon sahaja (100% rahsia)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF2E7D32)
+                                    )
+                                }
+                                Row {
+                                    IconButton(onClick = {
+                                        privateLogs = PrivateZoneLogHelper.readLogs(context)
+                                        Toast.makeText(context, "Log disegar semula.", Toast.LENGTH_SHORT).show()
+                                    }) {
+                                        Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
                                     }
-                                    Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-                                        Row(
-                                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
+                                    IconButton(onClick = {
+                                        PrivateZoneLogHelper.exportToDownloads(context)
+                                            .onSuccess { fileName ->
+                                                Toast.makeText(context, "Disimpan ke Downloads/$fileName", Toast.LENGTH_LONG).show()
+                                            }
+                                            .onFailure { err ->
+                                                Toast.makeText(context, err.message ?: "Gagal eksport.", Toast.LENGTH_SHORT).show()
+                                            }
+                                    }) {
+                                        Icon(Icons.Default.Download, contentDescription = "Eksport .txt", tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                    if (privateLogs.isNotEmpty()) {
+                                        IconButton(onClick = { showClearPrivateLogDialog = true }) {
+                                            Icon(Icons.Default.DeleteOutline, contentDescription = "Padam Log", tint = MaterialTheme.colorScheme.error)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(6.dp))
+
+                            if (privateLogs.isEmpty()) {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        "Belum ada rekod masuk/keluar zon peribadi dalam log_zon_peribadi.txt.",
+                                        textAlign = TextAlign.Center,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else {
+                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                    items(privateLogs) { item ->
+                                        val isEnter = item.message.startsWith("[MASUK]")
+                                        Card(
+                                            shape = RoundedCornerShape(12.dp),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                            ),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
-                                            Spacer(Modifier.width(12.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(log.message, style = MaterialTheme.typography.bodyMedium)
-                                                Text(
-                                                    formatter.format(Date(log.timestamp)),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            Row(
+                                                modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isEnter) Icons.Default.Login else Icons.Default.Logout,
+                                                    contentDescription = null,
+                                                    tint = if (isEnter) Color(0xFF2E7D32) else Color(0xFFE65100)
                                                 )
+                                                Spacer(Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(item.message, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                                    if (item.timestampText.isNotBlank()) {
+                                                        Text(
+                                                            item.timestampText,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
