@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.location.Geocoder
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -31,6 +33,9 @@ import com.muzrc.keluargamy360.util.CryptoHelper
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PermissionHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +43,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 data class MapUiState(
     val familyGroup: FamilyGroup? = null,
@@ -83,8 +90,8 @@ class MapViewModel(
     private var placesListener: ListenerRegistration? = null
     private var alertsListener: ListenerRegistration? = null
 
-    private val userProfilesCache = mutableMapOf<String, User>()
-    private val addressCache = mutableMapOf<String, String>()
+    private val userProfilesCache = ConcurrentHashMap<String, User>()
+    private val addressCache = ConcurrentHashMap<String, String>()
     private val sessionStartTime = System.currentTimeMillis()
 
     val currentUserId: String
@@ -94,78 +101,122 @@ class MapViewModel(
         startRealtimeListeners()
     }
 
+    private fun isVpnOrSlowNetwork(): Boolean {
+        return try {
+            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = cm.activeNetwork ?: return true
+            val caps = cm.getNetworkCapabilities(network) ?: return true
+            val hasVpn = caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            val isSlow = caps.linkDownstreamBandwidthKbps in 1..1500
+            hasVpn || isSlow
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun startRealtimeListeners() {
         val familyId = secureStorage.getFamilyId() ?: return
         val masterKey = secureStorage.getFamilyMasterKey() ?: return
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val famDoc = db.collection("families").document(familyId).get().await()
                 val group = famDoc.toObject(FamilyGroup::class.java)
                 _uiState.update { it.copy(familyGroup = group) }
 
-                group?.memberIds?.forEach { memberUid ->
-                    val uDoc = db.collection("users").document(memberUid).get().await()
-                    uDoc.toObject(User::class.java)?.let { userProfilesCache[memberUid] = it }
-                }
+                group?.memberIds?.map { memberUid ->
+                    async {
+                        val uDoc = db.collection("users").document(memberUid).get().await()
+                        uDoc.toObject(User::class.java)?.let { userProfilesCache[memberUid] = it }
+                    }
+                }?.awaitAll()
             } catch (_: Exception) {
             }
         }
 
-        // 1. Lokasi ahli masa nyata
+        // 1. Lokasi ahli masa nyata (dekripsi selari + kemas kini serta-merta tanpa tunggu Geocoder)
         locationsListener?.remove()
         locationsListener = db.collection("families").document(familyId)
             .collection("locations")
             .addSnapshotListener { snapshot, _ ->
                 if (snapshot == null) return@addSnapshotListener
                 viewModelScope.launch {
-                    val decryptedList = mutableListOf<DecryptedMemberLocation>()
+                    val immediateList = withContext(Dispatchers.Default) {
+                        coroutineScope {
+                            snapshot.documents.map { doc ->
+                                async {
+                                    val encLoc = doc.toObject(UserLocation::class.java) ?: return@async null
+                                    val plain = CryptoHelper.decrypt(
+                                        encLoc.encryptedPayload,
+                                        encLoc.iv,
+                                        masterKey
+                                    ) ?: return@async null
 
-                    for (doc in snapshot.documents) {
-                        val encLoc = doc.toObject(UserLocation::class.java) ?: continue
-                        val plain = CryptoHelper.decrypt(
-                            encLoc.encryptedPayload,
-                            encLoc.iv,
-                            masterKey
-                        ) ?: continue
+                                    val parts = plain.split("|")
+                                    if (parts.size < 5) return@async null
 
-                        val parts = plain.split("|")
-                        if (parts.size >= 5) {
-                            val lat = parts[0].toDoubleOrNull() ?: continue
-                            val lng = parts[1].toDoubleOrNull() ?: continue
-                            val speed = parts[2].toFloatOrNull() ?: 0f
-                            val battery = parts[3].toIntOrNull() ?: 100
-                            val charging = parts[4].toBooleanStrictOrNull() ?: false
+                                    val lat = parts[0].toDoubleOrNull() ?: return@async null
+                                    val lng = parts[1].toDoubleOrNull() ?: return@async null
+                                    val speed = parts[2].toFloatOrNull() ?: 0f
+                                    val battery = parts[3].toIntOrNull() ?: 100
+                                    val charging = parts[4].toBooleanStrictOrNull() ?: false
 
-                            val profile = userProfilesCache[encLoc.uid] ?: fetchAndCacheUser(encLoc.uid)
-                            val address = resolveAddress(lat, lng)
+                                    val profile = userProfilesCache[encLoc.uid] ?: fetchAndCacheUser(encLoc.uid)
+                                    val cacheKey = String.format(Locale.US, "%.3f,%.3f", lat, lng)
+                                    val cachedAddress = addressCache[cacheKey]
+                                        ?: String.format(Locale.US, "%.4f, %.4f", lat, lng)
 
-                            decryptedList.add(
-                                DecryptedMemberLocation(
-                                    uid = encLoc.uid,
-                                    name = profile?.name ?: "Ahli Keluarga",
-                                    photoUrl = profile?.photoUrl ?: "",
-                                    latitude = lat,
-                                    longitude = lng,
-                                    speedKmh = speed,
-                                    batteryLevel = battery,
-                                    isCharging = charging,
-                                    updatedAt = encLoc.updatedAt,
-                                    addressText = address
-                                )
-                            )
+                                    DecryptedMemberLocation(
+                                        uid = encLoc.uid,
+                                        name = profile?.name ?: "Ahli Keluarga",
+                                        photoUrl = profile?.photoUrl ?: "",
+                                        latitude = lat,
+                                        longitude = lng,
+                                        speedKmh = speed,
+                                        batteryLevel = battery,
+                                        isCharging = charging,
+                                        updatedAt = encLoc.updatedAt,
+                                        addressText = cachedAddress
+                                    )
+                                }
+                            }.awaitAll().filterNotNull()
                         }
                     }
 
+                    // Paparkan pin & kelajuan di peta serta-merta (0ms lag)
                     _uiState.update { state ->
                         val updatedSelected = state.selectedMember?.let { sel ->
-                            decryptedList.find { it.uid == sel.uid }
-                        } ?: decryptedList.firstOrNull()
+                            immediateList.find { it.uid == sel.uid }
+                        } ?: immediateList.firstOrNull()
 
                         state.copy(
-                            members = decryptedList,
+                            members = immediateList,
                             selectedMember = updatedSelected
                         )
+                    }
+
+                    // Cari nama jalan secara berasingan di background hanya jika rangkaian laju & tiada VPN
+                    if (!isVpnOrSlowNetwork() && immediateList.isNotEmpty()) {
+                        launch(Dispatchers.IO) {
+                            var anyResolved = false
+                            val enrichedList = immediateList.map { member ->
+                                val resolved = resolveAddressFast(member.latitude, member.longitude)
+                                if (resolved != member.addressText) {
+                                    anyResolved = true
+                                    member.copy(addressText = resolved)
+                                } else {
+                                    member
+                                }
+                            }
+                            if (anyResolved) {
+                                _uiState.update { state ->
+                                    val updatedSelected = state.selectedMember?.let { sel ->
+                                        enrichedList.find { it.uid == sel.uid }
+                                    } ?: enrichedList.firstOrNull()
+                                    state.copy(members = enrichedList, selectedMember = updatedSelected)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -184,7 +235,7 @@ class MapViewModel(
                 registerSystemGeofences(combinedPlaces)
             }
 
-        // 3. Log Aktiviti Keluarga & Amaran Masa Nyata (SOS, Ring Device, Bateri, Laju)
+        // 3. Log Aktiviti Keluarga & Amaran Masa Nyata
         alertsListener?.remove()
         alertsListener = db.collection("families").document(familyId)
             .collection("alerts")
@@ -234,38 +285,43 @@ class MapViewModel(
     }
 
     private suspend fun fetchAndCacheUser(uid: String): User? {
-        return try {
-            val doc = db.collection("users").document(uid).get().await()
-            doc.toObject(User::class.java)?.also { userProfilesCache[uid] = it }
-        } catch (e: Exception) {
-            null
+        return withTimeoutOrNull(2500L) {
+            try {
+                val doc = db.collection("users").document(uid).get().await()
+                doc.toObject(User::class.java)?.also { userProfilesCache[uid] = it }
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 
-    private suspend fun resolveAddress(lat: Double, lng: Double): String {
-        val key = String.format(Locale.US, "%.4f,%.4f", lat, lng)
+    private suspend fun resolveAddressFast(lat: Double, lng: Double): String {
+        val key = String.format(Locale.US, "%.3f,%.3f", lat, lng)
         addressCache[key]?.let { return it }
 
-        return withContext(Dispatchers.IO) {
-            try {
-                val geocoder = Geocoder(appContext, Locale("ms", "MY"))
-                @Suppress("DEPRECATION")
-                val results = geocoder.getFromLocation(lat, lng, 1)
-                val formatted = if (!results.isNullOrEmpty()) {
-                    val addr = results[0]
-                    listOfNotNull(addr.thoroughfare, addr.locality ?: addr.subAdminArea, addr.adminArea)
-                        .distinct()
-                        .joinToString(", ")
-                        .ifBlank { addr.getAddressLine(0) ?: key }
-                } else {
-                    key
+        val fallback = String.format(Locale.US, "%.4f, %.4f", lat, lng)
+        return withTimeoutOrNull(2000L) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val geocoder = Geocoder(appContext, Locale("ms", "MY"))
+                    @Suppress("DEPRECATION")
+                    val results = geocoder.getFromLocation(lat, lng, 1)
+                    val formatted = if (!results.isNullOrEmpty()) {
+                        val addr = results[0]
+                        listOfNotNull(addr.thoroughfare, addr.locality ?: addr.subAdminArea, addr.adminArea)
+                            .distinct()
+                            .joinToString(", ")
+                            .ifBlank { addr.getAddressLine(0) ?: fallback }
+                    } else {
+                        fallback
+                    }
+                    addressCache[key] = formatted
+                    formatted
+                } catch (_: Exception) {
+                    fallback
                 }
-                addressCache[key] = formatted
-                formatted
-            } catch (e: Exception) {
-                key
             }
-        }
+        } ?: fallback
     }
 
     fun selectMember(member: DecryptedMemberLocation) {
@@ -545,7 +601,6 @@ class MapViewModel(
                 .build()
         }
 
-        // Set initialTrigger = 0 supaya tidak membunyikan notifikasi palsu setiap kali aplikasi dibuka
         val request = GeofencingRequest.Builder()
             .setInitialTrigger(0)
             .addGeofences(geofences)
