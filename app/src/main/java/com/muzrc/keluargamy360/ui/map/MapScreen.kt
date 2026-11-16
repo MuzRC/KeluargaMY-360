@@ -10,8 +10,14 @@ import android.os.Build
 import android.os.SystemClock
 import android.view.animation.LinearInterpolator
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -95,6 +101,7 @@ fun MapScreen(
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var mapStyleMode by remember { mutableIntStateOf(0) }
+    var isFullscreenMap by remember { mutableStateOf(false) }
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     var hideBatteryBanner by remember {
@@ -102,6 +109,11 @@ fun MapScreen(
     }
     var hasBatteryExemption by remember {
         mutableStateOf(PermissionHelper.isIgnoringBatteryOptimizations(context))
+    }
+
+    // Tekan butang Back telefon untuk keluar daripada mod peta skrin penuh
+    BackHandler(enabled = isFullscreenMap) {
+        isFullscreenMap = false
     }
 
     // Keadaan interpolasi masa nyata bagi setiap ahli
@@ -375,30 +387,32 @@ fun MapScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = uiState.familyGroup?.familyName ?: "KeluargaMY360",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "${uiState.members.size} ahli aktif • Tersulit E2EE",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+            if (!isFullscreenMap) {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = uiState.familyGroup?.familyName ?: "KeluargaMY360",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "${uiState.members.size} ahli aktif • Tersulit E2EE",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    },
+                    actions = {
+                        TextButton(onClick = { showInviteDialog = true }) { Text("Kod Jemputan") }
+                        IconButton(onClick = onSignOut) { Icon(Icons.AutoMirrored.Filled.ExitToApp, "Log Keluar") }
                     }
-                },
-                actions = {
-                    TextButton(onClick = { showInviteDialog = true }) { Text("Kod Jemputan") }
-                    IconButton(onClick = onSignOut) { Icon(Icons.AutoMirrored.Filled.ExitToApp, "Log Keluar") }
-                }
-            )
+                )
+            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            if (!hideBatteryBanner) {
+            if (!isFullscreenMap && !hideBatteryBanner) {
                 Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
@@ -450,7 +464,11 @@ fun MapScreen(
                 }
             }
 
-            Box(modifier = Modifier.fillMaxWidth().weight(0.55f)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(if (isFullscreenMap) 1f else 0.55f)
+            ) {
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
@@ -500,33 +518,88 @@ fun MapScreen(
                     modifier = Modifier.align(Alignment.TopStart).padding(14.dp)
                 )
 
-                SmallFloatingActionButton(
-                    onClick = {
-                        mapStyleMode = (mapStyleMode + 1) % 3
-                        val modeLabel = when (mapStyleMode) {
-                            1 -> "Mod Peta: Gelap"
-                            2 -> "Mod Peta: Satelit"
-                            else -> "Mod Peta: Cerah"
-                        }
-                        Toast.makeText(context, modeLabel, Toast.LENGTH_SHORT).show()
-
-                        mapLibreMap?.setStyle(buildMapStyle(mapStyleMode)) { style ->
-                            MapMarkerHelper.setupLayers(style)
-                            mapLibreMap?.let {
-                                MapMarkerHelper.updateMembers(it, uiState.members)
-                                MapMarkerHelper.updateSafePlaces(it, uiState.safePlaces)
-                                MapMarkerHelper.updateHistoryRoute(it, uiState.activeHistoryRoute)
-                            }
-                        }
-                    },
+                // Butang Kawalan Kanan Atas: Tukar Mod Peta & Skrin Penuh
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.align(Alignment.TopEnd).padding(14.dp)
                 ) {
-                    val styleIcon = when (mapStyleMode) {
-                        0 -> Icons.Default.DarkMode
-                        1 -> Icons.Default.SatelliteAlt
-                        else -> Icons.Default.LightMode
+                    SmallFloatingActionButton(
+                        onClick = {
+                            mapStyleMode = (mapStyleMode + 1) % 3
+                            val modeLabel = when (mapStyleMode) {
+                                1 -> "Mod Peta: Gelap"
+                                2 -> "Mod Peta: Satelit"
+                                else -> "Mod Peta: Cerah"
+                            }
+                            Toast.makeText(context, modeLabel, Toast.LENGTH_SHORT).show()
+
+                            mapLibreMap?.setStyle(buildMapStyle(mapStyleMode)) { style ->
+                                MapMarkerHelper.setupLayers(style)
+                                mapLibreMap?.let {
+                                    MapMarkerHelper.updateMembers(it, uiState.members)
+                                    MapMarkerHelper.updateSafePlaces(it, uiState.safePlaces)
+                                    MapMarkerHelper.updateHistoryRoute(it, uiState.activeHistoryRoute)
+                                }
+                            }
+                        }
+                    ) {
+                        val styleIcon = when (mapStyleMode) {
+                            0 -> Icons.Default.DarkMode
+                            1 -> Icons.Default.SatelliteAlt
+                            else -> Icons.Default.LightMode
+                        }
+                        Icon(styleIcon, "Tukar Jenis Peta")
                     }
-                    Icon(styleIcon, "Tukar Jenis Peta")
+
+                    SmallFloatingActionButton(
+                        onClick = { isFullscreenMap = !isFullscreenMap }
+                    ) {
+                        Icon(
+                            imageVector = if (isFullscreenMap) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            contentDescription = if (isFullscreenMap) "Keluar Skrin Penuh" else "Peta Skrin Penuh"
+                        )
+                    }
+                }
+
+                // Lencana ringkas ahli aktif semasa dalam mod peta skrin penuh
+                if (isFullscreenMap) {
+                    uiState.selectedMember?.let { sel ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(start = 14.dp, bottom = 14.dp, end = 76.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.PersonPinCircle,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f, fill = false)) {
+                                    Text(
+                                        text = "${sel.name} • ${sel.batteryLevel}%",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = sel.addressText,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 SmallFloatingActionButton(
@@ -549,43 +622,50 @@ fun MapScreen(
                 }
             }
 
-            Surface(
-                modifier = Modifier.fillMaxWidth().weight(0.45f),
-                shadowElevation = 8.dp,
-                shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+            AnimatedVisibility(
+                visible = !isFullscreenMap,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+                modifier = Modifier.fillMaxWidth().weight(0.45f)
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = if (uiState.isTrackingEnabled) "GPS Aktif" else "GPS Dijeda",
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Switch(checked = uiState.isTrackingEnabled, onCheckedChange = { viewModel.toggleTracking(it) })
-                        }
-                    }
-
-                    if (uiState.members.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Menunggu isyarat GPS pertama...", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    } else {
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
-                            items(uiState.members, key = { it.uid }) { member ->
-                                MemberCard(
-                                    member = member,
-                                    isSelected = member.uid == uiState.selectedMember?.uid,
-                                    onClick = {
-                                        isCameraFollowing = true
-                                        viewModel.selectMember(member)
-                                    }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    shadowElevation = 8.dp,
+                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = if (uiState.isTrackingEnabled) "GPS Aktif" else "GPS Dijeda",
+                                    style = MaterialTheme.typography.labelMedium
                                 )
+                                Spacer(Modifier.width(6.dp))
+                                Switch(checked = uiState.isTrackingEnabled, onCheckedChange = { viewModel.toggleTracking(it) })
+                            }
+                        }
+
+                        if (uiState.members.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("Menunggu isyarat GPS pertama...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                                items(uiState.members, key = { it.uid }) { member ->
+                                    MemberCard(
+                                        member = member,
+                                        isSelected = member.uid == uiState.selectedMember?.uid,
+                                        onClick = {
+                                            isCameraFollowing = true
+                                            viewModel.selectMember(member)
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
