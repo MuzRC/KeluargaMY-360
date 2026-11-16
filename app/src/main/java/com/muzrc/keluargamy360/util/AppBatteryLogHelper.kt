@@ -70,8 +70,7 @@ object AppBatteryLogHelper {
 
     /**
      * Merekodkan statistik penggunaan tenaga KHUSUS proses KeluargaMY360 sahaja
-     * (CPU proses app, data rangkaian UID app, bilangan GPS fix, & anggaran mAh app)
-     * tanpa terganggu oleh penggunaan aplikasi lain seperti YouTube atau permainan.
+     * (CPU proses app, data rangkaian UID app, bilangan GPS fix, & anggaran mAh app).
      */
     fun logAppUsageCheckpoint(
         context: Context,
@@ -84,11 +83,10 @@ object AppBatteryLogHelper {
             try {
                 if (lastSnapshotElapsedMs == 0L) {
                     initBaseline()
-                    return
                 }
 
                 val nowElapsed = SystemClock.elapsedRealtime()
-                val durationMs = (nowElapsed - lastSnapshotElapsedMs).coerceAtLeast(1000L)
+                val durationMs = (nowElapsed - lastSnapshotElapsedMs).coerceAtLeast(0L)
                 val durationMin = durationMs / 60_000.0
 
                 val uid = Process.myUid()
@@ -106,11 +104,6 @@ object AppBatteryLogHelper {
                 val netFixes = (gpsFixes - satFixes).coerceAtLeast(0)
                 val uploads = firestoreWriteCountSinceLastLog
 
-                // Anggaran penggunaan mAh khusus komponen yang digerakkan oleh app ini sahaja:
-                // - CPU aktif proses: ~0.045 mAh per saat CPU
-                // - Imbasan GPS Satelit (High Accuracy): ~0.055 mAh per fix
-                // - Imbasan Lokasi Rangkaian (Balanced): ~0.012 mAh per fix
-                // - Penghantaran data modem selular/Wi-Fi: ~0.015 mAh per upload
                 val cpuMah = (deltaCpuMs / 1000.0) * 0.045
                 val gpsMah = (satFixes * 0.055) + (netFixes * 0.012)
                 val radioMah = uploads * 0.015
@@ -121,10 +114,10 @@ object AppBatteryLogHelper {
                 val chargeTag = if (isCharging) "Dicas $phoneBatteryLevel%" else "Bateri $phoneBatteryLevel%"
 
                 val ts = dateFormatter().format(Date())
-                val durationStr = if (durationMin < 1.0) {
-                    "${(durationMs / 1000L)}s"
-                } else {
-                    String.format(Locale.US, "%.1f min", durationMin)
+                val durationStr = when {
+                    durationMs < 1000L -> "Mula"
+                    durationMin < 1.0 -> "${(durationMs / 1000L)}s"
+                    else -> String.format(Locale.US, "%.1f min", durationMin)
                 }
 
                 val summaryPart = String.format(
