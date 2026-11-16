@@ -7,7 +7,11 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import com.google.firebase.FirebaseApp
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.PersistentCacheSettings
 import org.maplibre.android.MapLibre
+import org.maplibre.android.offline.OfflineManager
 
 class KeluargaApp : Application() {
 
@@ -20,8 +24,39 @@ class KeluargaApp : Application() {
     override fun onCreate() {
         super.onCreate()
         FirebaseApp.initializeApp(this)
+        configureFirestoreCache()
+
         MapLibre.getInstance(this)
+        configureMapLibreCache()
+
         createNotificationChannels()
+    }
+
+    private fun configureFirestoreCache() {
+        try {
+            val cacheSettings = PersistentCacheSettings.newBuilder()
+                .setSizeBytes(100L * 1024L * 1024L) // 100 MB Instant Disk Cache
+                .build()
+            val settings = FirebaseFirestoreSettings.Builder()
+                .setLocalCacheSettings(cacheSettings)
+                .build()
+            FirebaseFirestore.getInstance().firestoreSettings = settings
+        } catch (_: Exception) {
+            // Abaikan jika Firestore sudah dimulakan lebih awal
+        }
+    }
+
+    private fun configureMapLibreCache() {
+        try {
+            OfflineManager.getInstance(this).setMaximumAmbientCacheSize(
+                150L * 1024L * 1024L, // 150 MB Ambient Tile Cache
+                object : OfflineManager.FileSourceCallback {
+                    override fun onSuccess() = Unit
+                    override fun onError(message: String) = Unit
+                }
+            )
+        } catch (_: Exception) {
+        }
     }
 
     private fun createNotificationChannels() {
@@ -38,7 +73,7 @@ class KeluargaApp : Application() {
                 setShowBadge(false)
             }
 
-            // 2. Saluran senyap (tanpa bunyi bising) untuk kemas kini tiba/keluar Zon Selamat
+            // 2. Saluran senyap untuk kemas kini tiba/keluar Zon Selamat
             val geofenceChannel = NotificationChannel(
                 CHANNEL_GEOFENCE_ID,
                 "Kemas Kini Zon Selamat",
