@@ -32,10 +32,14 @@ import com.muzrc.keluargamy360.util.PermissionHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.max
@@ -45,16 +49,19 @@ import kotlin.math.sqrt
 class LocationTrackingService : Service(), SensorEventListener {
 
     private enum class PowerProfile {
-        MOVING_CHARGING,        // Bergerak + Dicas: Ultra-agresif GPS 5s / 10m
-        MOVING_HIGH_BATTERY,    // Bergerak + Bateri >= 50%: Agresif GPS 8s / 15m
-        MOVING_MEDIUM_BATTERY,  // Bergerak + Bateri 20%-49%: Seimbang GPS 15s / 25m
-        MOVING_LOW_BATTERY,     // Bergerak + Bateri < 20%: Jimat bergerak 40s / 40m
+        MOVING_CHARGING,        // Bergerak + Dicas: Ultra-agresif GPS 5s
+        MOVING_HIGH_BATTERY,    // Bergerak + Bateri >= 50%: Agresif GPS 8s
+        MOVING_MEDIUM_BATTERY,  // Bergerak + Bateri 20%-49%: Seimbang GPS 15s
+        MOVING_LOW_BATTERY,     // Bergerak + Bateri < 20%: Jimat bergerak 40s
         STATIONARY_NORMAL,      // Berhenti > 2 minit + Bateri >= 20%/Dicas: Tidur 2 minit
         STATIONARY_LOW_BATTERY  // Berhenti > 2 minit + Bateri < 20%: Tidur dalam 4 minit
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val uploadMutex = Mutex()
+    private val profileLock = Any()
+    private var monitorJob: Job? = null
+
     private lateinit var secureStorage: SecureStorage
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
@@ -88,7 +95,6 @@ class LocationTrackingService : Service(), SensorEventListener {
         locationRepository = LocationRepository(secureStorage)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         AppBatteryLogHelper.initBaseline()
-        lastBatteryLogTimeMs = System.currentTimeMillis()
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -179,36 +185,10 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
 
-                // 5. Tentukan profil kuasa adaptif (Pergerakan + Tahap/Pengecasan Bateri)
-                val stationaryDuration = now - lastMovementTimeMs
-                val isStationary = stationaryDuration >= IDLE_THRESHOLD_MS
-                val targetProfile = resolveTargetProfile(
-                    isStationary = isStationary,
-                    batteryLevel = battery.level,
-                    isCharging = battery.isCharging
-                )
+                // 5. Kemas kini profil kuasa adaptif & log bateri app
+                evaluateProfileAndBattery(now, battery.level, battery.isCharging)
 
-                val profileChanged = targetProfile != currentProfile
-                if (profileChanged) {
-                    AppBatteryLogHelper.logAppUsageCheckpoint(
-                        context = this@LocationTrackingService,
-                        reason = "Tukar Mod -> ${targetProfile.name}",
-                        profileName = currentProfile.name,
-                        phoneBatteryLevel = battery.level,
-                        isCharging = battery.isCharging
-                    )
-                    lastBatteryLogTimeMs = now
-                    currentProfile = targetProfile
-                    restartLocationUpdates()
-                } else {
-                    evaluatePeriodicAppBatteryLog(now, battery.level, battery.isCharging)
-                }
-
-                // 6. Hidupkan sensor pecutan semasa memandu >= 25 km/j (impak) ATAU semasa tidur (bangun pantas)
-                val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && speedKmh >= 25f
-                updateSensorState(shouldMonitorCrash || isStationary)
-
-                // 7. Muat naik ke Firestore dengan selang heartbeat adaptif mengikut bateri
+                // 6. Muat naik ke Firestore dengan selang heartbeat adaptif mengikut bateri
                 val heartbeatMs = if (currentProfile == PowerProfile.STATIONARY_LOW_BATTERY) {
                     HEARTBEAT_LOW_BATTERY_MS
                 } else {
@@ -261,6 +241,59 @@ class LocationTrackingService : Service(), SensorEventListener {
                     }
                 }
             }
+        }
+
+        startAppBatteryMonitorLoop()
+    }
+
+    /**
+     * Pemasa latar belakang bebas (setiap 60 saat) supaya log bateri app dan pertukaran
+     * mod tidur tetap berjalan walaupun telefon pegun semalaman tanpa pergerakan GPS.
+     */
+    private fun startAppBatteryMonitorLoop() {
+        monitorJob?.cancel()
+        monitorJob = serviceScope.launch {
+            while (isActive) {
+                delay(60_000L)
+                val now = System.currentTimeMillis()
+                val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
+                withContext(Dispatchers.Main) {
+                    evaluateProfileAndBattery(now, battery.level, battery.isCharging)
+                }
+            }
+        }
+    }
+
+    private fun evaluateProfileAndBattery(now: Long, batteryLevel: Int, isCharging: Boolean) {
+        synchronized(profileLock) {
+            val stationaryDuration = now - lastMovementTimeMs
+            val isStationary = stationaryDuration >= IDLE_THRESHOLD_MS
+            val targetProfile = resolveTargetProfile(
+                isStationary = isStationary,
+                batteryLevel = batteryLevel,
+                isCharging = isCharging
+            )
+
+            if (targetProfile != currentProfile) {
+                val oldProfile = currentProfile
+                currentProfile = targetProfile
+                AppBatteryLogHelper.logAppUsageCheckpoint(
+                    context = this,
+                    reason = "Tukar Mod -> ${targetProfile.name}",
+                    profileName = oldProfile.name,
+                    phoneBatteryLevel = batteryLevel,
+                    isCharging = isCharging
+                )
+                lastBatteryLogTimeMs = now
+                lastLoggedBatteryLevel = batteryLevel
+                lastLoggedChargingState = isCharging
+                restartLocationUpdates()
+            } else {
+                evaluatePeriodicAppBatteryLog(now, batteryLevel, isCharging)
+            }
+
+            val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && lastSpeedKmh >= 25f
+            updateSensorState(shouldMonitorCrash || isStationary)
         }
     }
 
@@ -335,7 +368,6 @@ class LocationTrackingService : Service(), SensorEventListener {
             val stateKey = "inside_${place.placeId}"
             val hasInitialState = statePrefs.contains(stateKey)
 
-            // Penampan histeresis 25m supaya isyarat di sempadan tidak berulang-alik
             val isInsideNow = if (hasInitialState && statePrefs.getBoolean(stateKey, false)) {
                 dist <= (place.radiusMeters + 25f)
             } else {
@@ -443,23 +475,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                     motionShakeCount = 0
                     lastMovementTimeMs = now
                     val battery = BatteryHelper.getBatteryStatus(this)
-                    val wakeProfile = resolveTargetProfile(
-                        isStationary = false,
-                        batteryLevel = battery.level,
-                        isCharging = battery.isCharging
-                    )
-                    if (wakeProfile != currentProfile) {
-                        AppBatteryLogHelper.logAppUsageCheckpoint(
-                            context = this,
-                            reason = "Bangun Pergerakan -> ${wakeProfile.name}",
-                            profileName = currentProfile.name,
-                            phoneBatteryLevel = battery.level,
-                            isCharging = battery.isCharging
-                        )
-                        lastBatteryLogTimeMs = now
-                        currentProfile = wakeProfile
-                        restartLocationUpdates()
-                    }
+                    evaluateProfileAndBattery(now, battery.level, battery.isCharging)
                 }
             }
         }
@@ -470,11 +486,24 @@ class LocationTrackingService : Service(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         val battery = BatteryHelper.getBatteryStatus(this)
+        val now = System.currentTimeMillis()
         currentProfile = resolveTargetProfile(
             isStationary = false,
             batteryLevel = battery.level,
             isCharging = battery.isCharging
         )
+        if (lastLoggedBatteryLevel == -1) {
+            lastBatteryLogTimeMs = now
+            lastLoggedBatteryLevel = battery.level
+            lastLoggedChargingState = battery.isCharging
+            AppBatteryLogHelper.logAppUsageCheckpoint(
+                context = this,
+                reason = "Servis Mula",
+                profileName = currentProfile.name,
+                phoneBatteryLevel = battery.level,
+                isCharging = battery.isCharging
+            )
+        }
         startLocationUpdates()
         return START_STICKY
     }
@@ -483,24 +512,24 @@ class LocationTrackingService : Service(), SensorEventListener {
     private fun startLocationUpdates() {
         if (!PermissionHelper.hasFineLocation(this)) return
 
-        val (priority, intervalMs, minUpdateMs, minDistance) = when (currentProfile) {
+        // Tanpa setMinUpdateDistanceMeters supaya selang masa & pengesan pegun sentiasa berfungsi
+        val (priority, intervalMs, minUpdateMs) = when (currentProfile) {
             PowerProfile.MOVING_CHARGING ->
-                Quad(Priority.PRIORITY_HIGH_ACCURACY, 5_000L, 3_000L, 10f)
+                Triple(Priority.PRIORITY_HIGH_ACCURACY, 5_000L, 3_000L)
             PowerProfile.MOVING_HIGH_BATTERY ->
-                Quad(Priority.PRIORITY_HIGH_ACCURACY, 8_000L, 5_000L, 15f)
+                Triple(Priority.PRIORITY_HIGH_ACCURACY, 8_000L, 5_000L)
             PowerProfile.MOVING_MEDIUM_BATTERY ->
-                Quad(Priority.PRIORITY_HIGH_ACCURACY, 15_000L, 8_000L, MIN_DISPLACEMENT_METERS)
+                Triple(Priority.PRIORITY_HIGH_ACCURACY, 15_000L, 8_000L)
             PowerProfile.MOVING_LOW_BATTERY ->
-                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 40_000L, 20_000L, 40f)
+                Triple(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 40_000L, 20_000L)
             PowerProfile.STATIONARY_NORMAL ->
-                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 120_000L, 60_000L, MIN_DISPLACEMENT_METERS)
+                Triple(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 120_000L, 60_000L)
             PowerProfile.STATIONARY_LOW_BATTERY ->
-                Quad(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 240_000L, 120_000L, 35f)
+                Triple(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 240_000L, 120_000L)
         }
 
         val request = LocationRequest.Builder(priority, intervalMs)
             .setMinUpdateIntervalMillis(minUpdateMs)
-            .setMinUpdateDistanceMeters(minDistance)
             .build()
 
         fusedLocationClient.requestLocationUpdates(
@@ -535,6 +564,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        monitorJob?.cancel()
         val battery = BatteryHelper.getBatteryStatus(this)
         AppBatteryLogHelper.logAppUsageCheckpoint(
             context = this,
@@ -550,13 +580,6 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private data class Quad(
-        val priority: Int,
-        val intervalMs: Long,
-        val minUpdateMs: Long,
-        val minDistance: Float
-    )
 
     companion object {
         private const val NOTIFICATION_ID = 3601
