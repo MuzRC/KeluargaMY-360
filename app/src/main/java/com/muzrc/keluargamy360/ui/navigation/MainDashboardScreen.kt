@@ -70,12 +70,16 @@ fun MainDashboardScreen(
     var safetyLogMode by remember { mutableIntStateOf(0) }
     var privateLogs by remember { mutableStateOf(PrivateZoneLogHelper.readLogs(context)) }
     var appBatteryLogs by remember { mutableStateOf(AppBatteryLogHelper.readLogs(context)) }
+    var batterySinceCharge by remember { mutableStateOf(AppBatteryLogHelper.getUsageSinceLastCharge(context)) }
 
     LaunchedEffect(selectedTab, safetyLogMode) {
         if (selectedTab == 3) {
             when (safetyLogMode) {
                 1 -> privateLogs = PrivateZoneLogHelper.readLogs(context)
-                2 -> appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                2 -> {
+                    appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                    batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
+                }
             }
         }
     }
@@ -466,6 +470,7 @@ fun MainDashboardScreen(
                                 onClick = {
                                     safetyLogMode = 2
                                     appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                    batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
                                 icon = { Icon(Icons.Default.BatteryChargingFull, null, modifier = Modifier.size(16.dp)) }
@@ -634,12 +639,14 @@ fun MainDashboardScreen(
                                                 isCharging = bat.isCharging
                                             )
                                             appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                            batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
                                             Toast.makeText(context, "Rekod bateri app disimpan!", Toast.LENGTH_SHORT).show()
                                         }) {
                                             Icon(Icons.Default.AddCircleOutline, contentDescription = "Rekod Sekarang", tint = MaterialTheme.colorScheme.primary)
                                         }
                                         IconButton(onClick = {
                                             appBatteryLogs = AppBatteryLogHelper.readLogs(context)
+                                            batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
                                             Toast.makeText(context, "Log bateri disegar semula.", Toast.LENGTH_SHORT).show()
                                         }) {
                                             Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
@@ -664,6 +671,90 @@ fun MainDashboardScreen(
                                 }
 
                                 Spacer(Modifier.height(6.dp))
+
+                                // Kad Ringkasan Jumlah Bateri Digunakan Sejak Kali Terakhir Dicas
+                                val sinceFmt = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
+                                Card(
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "Jumlah Sejak Kali Terakhir Dicas",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                            Text(
+                                                if (batterySinceCharge.isCurrentlyCharging) {
+                                                    "Sedang Dicas (${batterySinceCharge.currentBatteryPercent}%)"
+                                                } else {
+                                                    "Sejak ${sinceFmt.format(Date(batterySinceCharge.sinceTimestampMs))}"
+                                                },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+
+                                        Spacer(Modifier.height(8.dp))
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    "Digunakan App Ini",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                val pctText = batterySinceCharge.appUsedPercentEstimate?.let {
+                                                    String.format(Locale.US, " (~%.2f%%)", it)
+                                                } ?: ""
+                                                Text(
+                                                    String.format(Locale.US, "~%.2f mAh%s", batterySinceCharge.appUsedMah, pctText),
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+
+                                            Column(horizontalAlignment = Alignment.End) {
+                                                Text(
+                                                    "Bateri Telefon Turun",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Text(
+                                                    if (batterySinceCharge.isCurrentlyCharging) {
+                                                        "0% (Dicas)"
+                                                    } else {
+                                                        "${batterySinceCharge.phoneBatteryUsedPercent}% (${batterySinceCharge.startBatteryPercent}% → ${batterySinceCharge.currentBatteryPercent}%)"
+                                                    },
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            "Aktiviti sejak cabut cas: ${batterySinceCharge.totalGpsFixes}x semakan GPS • ${batterySinceCharge.totalUploads}x hantar lokasi",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(8.dp))
 
                                 if (appBatteryLogs.isEmpty()) {
                                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
