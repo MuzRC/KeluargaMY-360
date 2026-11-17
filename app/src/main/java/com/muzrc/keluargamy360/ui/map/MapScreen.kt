@@ -82,7 +82,7 @@ private const val SATELLITE_STYLE_JSON = """
 
 private fun buildMapStyle(mode: Int): Style.Builder {
     return when (mode) {
-        1 -> Style.Builder().fromUri("https://tiles.openfreemap.org/styles/dark")
+        1 -> Style.Builder().fromUri("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json")
         2 -> Style.Builder().fromJson(SATELLITE_STYLE_JSON)
         else -> Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")
     }
