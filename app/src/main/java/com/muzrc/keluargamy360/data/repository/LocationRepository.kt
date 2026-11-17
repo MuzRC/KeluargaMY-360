@@ -63,8 +63,9 @@ class LocationRepository(
     }
 
     /**
-     * Merakam titik laluan 24 jam. Jika tiada sambungan internet atau muat naik tamat tempoh,
-     * titik berserta cap masa asal akan disimpan dalam barisan luar talian tempatan.
+     * Merakam titik laluan sejarah (disimpan sehingga 7 hari).
+     * Jika tiada sambungan internet atau muat naik tamat tempoh, titik berserta cap masa asal
+     * akan disimpan dalam barisan luar talian tempatan.
      */
     suspend fun appendHistoryPoint(
         latitude: Double,
@@ -96,8 +97,8 @@ class LocationRepository(
                     .await()
             }
 
-            // Padam rekod sejarah lebih lama daripada 24 jam menggunakan indeks tunggal automatik
-            val cutoff = System.currentTimeMillis() - 86_400_000L
+            // Padam rekod sejarah lebih lama daripada 7 hari menggunakan indeks tunggal automatik
+            val cutoff = System.currentTimeMillis() - SEVEN_DAYS_MS
             val oldDocs = db.collection("families").document(familyId)
                 .collection("history")
                 .whereLessThan("timestamp", cutoff)
@@ -160,20 +161,25 @@ class LocationRepository(
     }
 
     /**
-     * Mengambil sejarah laluan 24 jam tanpa bergantung pada Firestore Composite Index
-     * (menggunakan indeks tunggal timestamp + tapisan uid & susunan masa di aplikasi),
-     * serta menggabungkan titik luar talian tempatan yang belum sempat dimuat naik.
+     * Mengambil sejarah laluan mengikut julat masa hari tertentu (startTimeMs..endTimeMs)
+     * menggunakan indeks tunggal timestamp sahaja supaya menjimatkan kuota bacaan Firestore
+     * dan bebas daripada ralat Composite Index.
      */
-    suspend fun get24HourHistory(targetUid: String, context: Context? = null): List<HistoryPoint> {
+    suspend fun getHistoryForRange(
+        targetUid: String,
+        startTimeMs: Long,
+        endTimeMs: Long,
+        context: Context? = null
+    ): List<HistoryPoint> {
         val familyId = secureStorage.getFamilyId() ?: return emptyList()
         val masterKey = secureStorage.getFamilyMasterKey() ?: return emptyList()
-        val cutoff = System.currentTimeMillis() - 86_400_000L
 
         val remotePoints = try {
             val snap = withTimeout(6000L) {
                 db.collection("families").document(familyId)
                     .collection("history")
-                    .whereGreaterThan("timestamp", cutoff)
+                    .whereGreaterThanOrEqualTo("timestamp", startTimeMs)
+                    .whereLessThanOrEqualTo("timestamp", endTimeMs)
                     .get()
                     .await()
             }
@@ -195,7 +201,11 @@ class LocationRepository(
 
         val localQueuedPoints = if (context != null) {
             OfflineRouteQueueHelper.peekAll(context)
-                .filter { it.uid == targetUid && it.familyId == familyId && it.timestamp > cutoff }
+                .filter {
+                    it.uid == targetUid &&
+                        it.familyId == familyId &&
+                        it.timestamp in startTimeMs..endTimeMs
+                }
                 .map { HistoryPoint(it.latitude, it.longitude, it.timestamp) }
         } else {
             emptyList()
@@ -204,6 +214,11 @@ class LocationRepository(
         return (remotePoints + localQueuedPoints)
             .distinctBy { it.timestamp }
             .sortedBy { it.timestamp }
+    }
+
+    suspend fun get24HourHistory(targetUid: String, context: Context? = null): List<HistoryPoint> {
+        val now = System.currentTimeMillis()
+        return getHistoryForRange(targetUid, now - 86_400_000L, now, context)
     }
 
     suspend fun postFamilyAlert(
@@ -274,5 +289,9 @@ class LocationRepository(
             targetUid = targetUid,
             message = "$senderName membunyikan penggera telefon $targetName."
         )
+    }
+
+    companion object {
+        private const val SEVEN_DAYS_MS = 7L * 86_400_000L
     }
 }
