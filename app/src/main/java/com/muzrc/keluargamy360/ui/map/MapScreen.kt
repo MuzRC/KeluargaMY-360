@@ -48,6 +48,7 @@ import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.PermissionHelper
+import com.muzrc.keluargamy360.util.RoadDistanceHelper
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
@@ -400,22 +401,28 @@ fun MapScreen(
     // Dialog Tindakan Pantas apabila penanda ahli diketik terus di atas peta
     mapActionMember?.let { member ->
         val isNotMe = member.uid != currentUserId
-        val distanceText = remember(myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude, isNotMe) {
-            if (!isNotMe || myLocation == null) {
-                null
-            } else {
-                val res = FloatArray(1)
-                Location.distanceBetween(
+        var roadEst by remember(member.uid, myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude) {
+            mutableStateOf(
+                if (!isNotMe || myLocation == null) null
+                else RoadDistanceHelper.computeStraightLine(
                     myLocation.latitude,
                     myLocation.longitude,
                     member.latitude,
-                    member.longitude,
-                    res
+                    member.longitude
                 )
-                if (res[0] < 1000f) "${res[0].roundToInt()} meter dari anda"
-                else String.format(Locale.US, "%.1f km dari anda", res[0] / 1000f)
+            )
+        }
+        LaunchedEffect(member.uid, myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude) {
+            if (isNotMe && myLocation != null) {
+                roadEst = RoadDistanceHelper.getRoadEstimate(
+                    myLocation.latitude,
+                    myLocation.longitude,
+                    member.latitude,
+                    member.longitude
+                )
             }
         }
+        val distanceText = roadEst?.formatCompact()
         val statusSummary = buildString {
             append("Bateri ${member.batteryLevel}%")
             if (member.isCharging) append(" (Dicas)")
@@ -853,21 +860,38 @@ fun MapScreen(
                 // Lencana ringkas ahli aktif (boleh diketik untuk tindakan pantas) semasa dalam mod skrin penuh
                 if (isFullscreenMap) {
                     uiState.selectedMember?.let { sel ->
-                        val distText = remember(myLocation?.latitude, myLocation?.longitude, sel.latitude, sel.longitude) {
-                            if (myLocation == null || myLocation.uid == sel.uid) {
-                                null
-                            } else {
-                                val res = FloatArray(1)
-                                Location.distanceBetween(
+                        val badgeGridKey = remember(
+                            myLocation?.latitude,
+                            myLocation?.longitude,
+                            sel.latitude,
+                            sel.longitude,
+                            sel.uid
+                        ) {
+                            if (myLocation == null || myLocation.uid == sel.uid) null
+                            else "${(myLocation.latitude * 1000).roundToInt()},${(myLocation.longitude * 1000).roundToInt()}->${(sel.latitude * 1000).roundToInt()},${(sel.longitude * 1000).roundToInt()}"
+                        }
+                        var badgeRoadEst by remember(badgeGridKey) {
+                            mutableStateOf(
+                                if (myLocation == null || myLocation.uid == sel.uid) null
+                                else RoadDistanceHelper.computeStraightLine(
                                     myLocation.latitude,
                                     myLocation.longitude,
                                     sel.latitude,
-                                    sel.longitude,
-                                    res
+                                    sel.longitude
                                 )
-                                if (res[0] < 1000f) "${res[0].roundToInt()} m" else String.format(Locale.US, "%.1f km", res[0] / 1000f)
+                            )
+                        }
+                        LaunchedEffect(badgeGridKey) {
+                            if (myLocation != null && myLocation.uid != sel.uid && badgeGridKey != null) {
+                                badgeRoadEst = RoadDistanceHelper.getRoadEstimate(
+                                    myLocation.latitude,
+                                    myLocation.longitude,
+                                    sel.latitude,
+                                    sel.longitude
+                                )
                             }
                         }
+                        val distText = badgeRoadEst?.formatBadgeShort()
 
                         Surface(
                             shape = RoundedCornerShape(14.dp),

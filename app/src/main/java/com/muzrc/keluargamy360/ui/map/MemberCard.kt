@@ -1,7 +1,6 @@
 package com.muzrc.keluargamy360.ui.map
 
 import android.content.Intent
-import android.location.Location
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -20,7 +19,11 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -33,7 +36,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
-import java.util.Locale
+import com.muzrc.keluargamy360.util.RoadDistanceHelper
+import com.muzrc.keluargamy360.util.RoadRouteEstimate
 import kotlin.math.roundToInt
 
 private const val OFFLINE_THRESHOLD_MS = 15L * 60L * 1000L // 15 minit
@@ -50,7 +54,7 @@ fun MemberCard(
     val isOffline = member.updatedAt > 0L && (now - member.updatedAt) >= OFFLINE_THRESHOLD_MS
     val isMe = myLocation != null && myLocation.uid == member.uid
 
-    val distanceLabel = remember(
+    val gridKey = remember(
         myLocation?.latitude,
         myLocation?.longitude,
         member.latitude,
@@ -60,17 +64,37 @@ fun MemberCard(
         if (myLocation == null || isMe) {
             null
         } else {
-            val result = FloatArray(1)
-            Location.distanceBetween(
-                myLocation.latitude,
-                myLocation.longitude,
-                member.latitude,
-                member.longitude,
-                result
-            )
-            formatDistanceFromMe(result[0])
+            "${(myLocation.latitude * 1000).roundToInt()},${(myLocation.longitude * 1000).roundToInt()}->${(member.latitude * 1000).roundToInt()},${(member.longitude * 1000).roundToInt()}"
         }
     }
+
+    var routeEstimate by remember(gridKey) {
+        mutableStateOf<RoadRouteEstimate?>(
+            if (myLocation == null || isMe) {
+                null
+            } else {
+                RoadDistanceHelper.computeStraightLine(
+                    myLocation.latitude,
+                    myLocation.longitude,
+                    member.latitude,
+                    member.longitude
+                )
+            }
+        )
+    }
+
+    LaunchedEffect(gridKey) {
+        if (myLocation != null && !isMe && gridKey != null) {
+            routeEstimate = RoadDistanceHelper.getRoadEstimate(
+                myLat = myLocation.latitude,
+                myLng = myLocation.longitude,
+                targetLat = member.latitude,
+                targetLng = member.longitude
+            )
+        }
+    }
+
+    val distanceLabel = routeEstimate?.formatCompact()
 
     val borderColor = when {
         isSelected -> MaterialTheme.colorScheme.primary
@@ -290,14 +314,6 @@ fun MemberCard(
                 )
             }
         }
-    }
-}
-
-private fun formatDistanceFromMe(meters: Float): String {
-    return when {
-        meters < 50f -> "Berhampiran anda"
-        meters < 1000f -> "${meters.roundToInt()} m dari anda"
-        else -> String.format(Locale.US, "%.1f km dari anda", meters / 1000f)
     }
 }
 
