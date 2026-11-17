@@ -20,6 +20,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +42,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.data.local.SecureStorage
+import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.PermissionHelper
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -114,6 +116,7 @@ fun MapScreen(
     var isFullscreenMap by remember { mutableStateOf(false) }
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
+    var mapActionMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var hideBatteryBanner by remember {
         mutableStateOf(secureStorage.isAutoStartConfigured())
     }
@@ -325,6 +328,103 @@ fun MapScreen(
         )
     }
 
+    // Dialog Tindakan Pantas apabila penanda ahli diketik terus di atas peta
+    mapActionMember?.let { member ->
+        val isNotMe = member.uid != currentUserId
+        val distanceText = remember(myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude, isNotMe) {
+            if (!isNotMe || myLocation == null) {
+                null
+            } else {
+                val res = FloatArray(1)
+                Location.distanceBetween(
+                    myLocation.latitude,
+                    myLocation.longitude,
+                    member.latitude,
+                    member.longitude,
+                    res
+                )
+                if (res[0] < 1000f) "${res[0].roundToInt()} meter dari anda"
+                else String.format(Locale.US, "%.1f km dari anda", res[0] / 1000f)
+            }
+        }
+        val statusSummary = buildString {
+            append("Bateri ${member.batteryLevel}%")
+            if (member.isCharging) append(" (Dicas)")
+            if (member.speedKmh >= 5f) append(" • ${member.speedKmh.roundToInt()} km/j")
+            if (distanceText != null) append(" • $distanceText")
+        }
+
+        AlertDialog(
+            onDismissRequest = { mapActionMember = null },
+            title = {
+                Column {
+                    Text(member.name, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = statusSummary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(member.addressText, style = MaterialTheme.typography.bodySmall)
+
+                    if (isNotMe) {
+                        Button(
+                            onClick = {
+                                mapActionMember = null
+                                val uri = Uri.parse(
+                                    "geo:${member.latitude},${member.longitude}?q=${member.latitude},${member.longitude}(${Uri.encode(member.name)})"
+                                )
+                                val navIntent = Intent(Intent.ACTION_VIEW, uri)
+                                try {
+                                    context.startActivity(Intent.createChooser(navIntent, "Pandu ke ${member.name}"))
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "Tiada aplikasi peta/navigasi dijumpai.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Navigation, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Pandu ke Lokasi (Waze / Maps)", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            mapActionMember = null
+                            viewModel.load24HourRoute(member)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Timeline, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Lihat Sejarah Laluan 24 Jam")
+                    }
+
+                    if (isNotMe) {
+                        FilledTonalButton(
+                            onClick = {
+                                mapActionMember = null
+                                viewModel.ringMemberDevice(member)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.NotificationsActive, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Deringkan Telefon (Walaupun Senyap)")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { mapActionMember = null }) { Text("Tutup") }
+            }
+        )
+    }
+
     uiState.activeSosAlert?.let { alertMsg ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissSosAlert() },
@@ -483,6 +583,32 @@ fun MapScreen(
                                     isCameraFollowing = false
                                 }
                             }
+                            // Ketik penanda ahli terus di atas peta untuk fokus & tindakan pantas
+                            map.addOnMapClickListener { tapPoint ->
+                                val clickedUid = MapMarkerHelper.findClickedMemberUid(map, tapPoint)
+                                if (clickedUid != null) {
+                                    val tappedMember = latestMembers.find { it.uid == clickedUid }
+                                    if (tappedMember != null) {
+                                        isCameraFollowing = true
+                                        if (latestSelectedUid == tappedMember.uid) {
+                                            mapActionMember = tappedMember
+                                        } else {
+                                            viewModel.selectMember(tappedMember)
+                                            val pos = renderedCoords[tappedMember.uid]
+                                                ?: (tappedMember.latitude to tappedMember.longitude)
+                                            map.animateCamera(
+                                                CameraUpdateFactory.newLatLngZoom(
+                                                    LatLng(pos.first, pos.second),
+                                                    16.0
+                                                ),
+                                                700
+                                            )
+                                        }
+                                        return@addOnMapClickListener true
+                                    }
+                                }
+                                false
+                            }
                             map.setStyle(buildMapStyle(mapStyleMode)) { style ->
                                 MapMarkerHelper.setupLayers(style)
                                 mapLibreMap = map
@@ -566,7 +692,7 @@ fun MapScreen(
                     }
                 }
 
-                // Lencana ringkas ahli aktif + butang navigasi terus semasa dalam mod peta skrin penuh
+                // Lencana ringkas ahli aktif (boleh diketik untuk tindakan pantas) semasa dalam mod skrin penuh
                 if (isFullscreenMap) {
                     uiState.selectedMember?.let { sel ->
                         val distText = remember(myLocation?.latitude, myLocation?.longitude, sel.latitude, sel.longitude) {
@@ -592,6 +718,7 @@ fun MapScreen(
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
                                 .padding(start = 14.dp, bottom = 14.dp, end = 76.dp)
+                                .clickable { mapActionMember = sel }
                         ) {
                             Row(
                                 modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),

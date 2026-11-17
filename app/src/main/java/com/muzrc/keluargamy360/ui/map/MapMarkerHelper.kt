@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
 import com.muzrc.keluargamy360.data.model.HistoryPoint
 import com.muzrc.keluargamy360.data.model.SafePlace
+import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.expressions.Expression
@@ -31,7 +32,7 @@ object MapMarkerHelper {
     private const val HISTORY_SOURCE_ID = "keluargamy360-history-source"
     private const val HISTORY_LINE_LAYER_ID = "keluargamy360-history-line"
     private const val MEMBERS_SOURCE_ID = "keluargamy360-members-source"
-    private const val MEMBERS_SYMBOL_LAYER_ID = "keluargamy360-members-symbol"
+    const val MEMBERS_SYMBOL_LAYER_ID = "keluargamy360-members-symbol"
 
     private val badgeSignatureCache = mutableMapOf<String, String>()
 
@@ -77,6 +78,26 @@ object MapMarkerHelper {
                 PropertyFactory.iconAnchor("bottom")
             )
             style.addLayer(symbolLayer)
+        }
+    }
+
+    /**
+     * Mengesan sama ada pengguna mengetik penanda ahli keluarga pada peta.
+     * Menggunakan kawasan sentuhan yang selesa merangkumi keseluruhan lencana pin (anchor bottom).
+     */
+    fun findClickedMemberUid(map: MapLibreMap, tapLatLng: LatLng): String? {
+        return try {
+            val screenPt = map.projection.toScreenLocation(tapLatLng)
+            val hitBox = RectF(
+                screenPt.x - 52f,
+                screenPt.y - 125f,
+                screenPt.x + 52f,
+                screenPt.y + 24f
+            )
+            val features = map.queryRenderedFeatures(hitBox, MEMBERS_SYMBOL_LAYER_ID)
+            features.firstOrNull()?.getStringProperty("uid")?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -128,6 +149,7 @@ object MapMarkerHelper {
             }
 
             Feature.fromGeometry(Point.fromLngLat(m.longitude, m.latitude)).apply {
+                addStringProperty("uid", m.uid)
                 addStringProperty("iconId", iconId)
             }
         }
