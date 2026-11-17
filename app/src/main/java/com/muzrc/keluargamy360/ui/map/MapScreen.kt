@@ -24,6 +24,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -57,6 +58,9 @@ import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -460,13 +464,13 @@ fun MapScreen(
                     FilledTonalButton(
                         onClick = {
                             mapActionMember = null
-                            viewModel.load24HourRoute(member)
+                            viewModel.load24HourRoute(member, 0)
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.Timeline, null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Lihat Sejarah Laluan 24 Jam")
+                        Text("Lihat Sejarah Laluan (7 Hari)")
                     }
 
                     FilledTonalButton(
@@ -676,14 +680,48 @@ fun MapScreen(
             }
 
             uiState.historyOwnerName?.let { ownerName ->
+                val dayChipLabels = remember {
+                    val fmt = SimpleDateFormat("dd MMM", Locale("ms", "MY"))
+                    (0..6).map { offset ->
+                        when (offset) {
+                            0 -> offset to "Hari Ini"
+                            1 -> offset to "Semalam"
+                            else -> {
+                                val c = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -offset) }
+                                offset to fmt.format(Date(c.timeInMillis))
+                            }
+                        }
+                    }
+                }
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Laluan 24 Jam: $ownerName", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                        TextButton(onClick = { viewModel.clear24HourRoute() }) { Text("Tutup Laluan") }
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Sejarah Laluan: $ownerName",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            TextButton(
+                                onClick = { viewModel.clear24HourRoute() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) { Text("Tutup") }
+                        }
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                        ) {
+                            items(dayChipLabels, key = { it.first }) { (offset, label) ->
+                                FilterChip(
+                                    selected = uiState.historyDayOffset == offset,
+                                    onClick = { viewModel.selectHistoryDay(offset) },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
                     }
                 }
             }

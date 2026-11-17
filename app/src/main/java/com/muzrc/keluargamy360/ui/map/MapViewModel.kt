@@ -44,6 +44,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
@@ -56,6 +59,8 @@ data class MapUiState(
     val activityLogs: List<ActivityLogItem> = emptyList(),
     val activeHistoryRoute: List<HistoryPoint> = emptyList(),
     val historyOwnerName: String? = null,
+    val historyTargetMember: DecryptedMemberLocation? = null,
+    val historyDayOffset: Int = 0,
     val activeSosAlert: String? = null,
     val statusMessage: String? = null,
     val isSendingSos: Boolean = false,
@@ -375,7 +380,10 @@ class MapViewModel(
             val updatedSelected = state.selectedMember?.let { sel ->
                 if (sel.uid == targetUid) sel.copy(name = effectiveName) else sel
             }
-            val updatedHistoryOwner = if (state.historyOwnerName != null && state.selectedMember?.uid == targetUid) {
+            val updatedHistoryMember = state.historyTargetMember?.let { hm ->
+                if (hm.uid == targetUid) hm.copy(name = effectiveName) else hm
+            }
+            val updatedHistoryOwner = if (state.historyTargetMember?.uid == targetUid) {
                 effectiveName
             } else {
                 state.historyOwnerName
@@ -384,6 +392,7 @@ class MapViewModel(
                 memberNicknames = updatedMap,
                 members = updatedMembers,
                 selectedMember = updatedSelected,
+                historyTargetMember = updatedHistoryMember,
                 historyOwnerName = updatedHistoryOwner,
                 statusMessage = if (cleanNickname.isNotEmpty()) {
                     "Nama panggilan ditukar ke '$cleanNickname'."
@@ -394,33 +403,69 @@ class MapViewModel(
         }
     }
 
-    fun load24HourRoute(member: DecryptedMemberLocation) {
+    fun load24HourRoute(member: DecryptedMemberLocation, dayOffset: Int = 0) {
+        val safeOffset = dayOffset.coerceIn(0, 6)
         viewModelScope.launch {
             locationRepository.flushOfflineRouteQueue(appContext)
-            val points = locationRepository.get24HourHistory(member.uid, appContext)
-            if (points.size < 2) {
-                _uiState.update {
-                    it.copy(
-                        activeHistoryRoute = emptyList(),
-                        historyOwnerName = null,
-                        statusMessage = "Belum cukup rekod pergerakan 24 jam untuk ${member.name}."
-                    )
-                }
+
+            val cal = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                add(Calendar.DAY_OF_YEAR, -safeOffset)
+            }
+            val startOfDayMs = cal.timeInMillis
+            val endOfDayMs = if (safeOffset == 0) {
+                System.currentTimeMillis()
             } else {
-                _uiState.update {
-                    it.copy(
-                        selectedMember = member,
-                        activeHistoryRoute = points,
-                        historyOwnerName = member.name,
-                        statusMessage = "Memaparkan ${points.size} titik laluan 24 jam ${member.name}."
-                    )
-                }
+                startOfDayMs + 86_400_000L - 1L
+            }
+
+            val dayLabel = when (safeOffset) {
+                0 -> "Hari Ini"
+                1 -> "Semalam"
+                else -> SimpleDateFormat("dd MMM", Locale("ms", "MY")).format(Date(startOfDayMs))
+            }
+
+            val points = locationRepository.getHistoryForRange(
+                targetUid = member.uid,
+                startTimeMs = startOfDayMs,
+                endTimeMs = endOfDayMs,
+                context = appContext
+            )
+
+            _uiState.update {
+                it.copy(
+                    selectedMember = member,
+                    historyTargetMember = member,
+                    historyOwnerName = member.name,
+                    historyDayOffset = safeOffset,
+                    activeHistoryRoute = if (points.size >= 2) points else emptyList(),
+                    statusMessage = if (points.size >= 2) {
+                        "Memaparkan ${points.size} titik laluan ${member.name} ($dayLabel)."
+                    } else {
+                        "Tiada rekod perjalanan mencukupi untuk ${member.name} pada $dayLabel."
+                    }
+                )
             }
         }
     }
 
+    fun selectHistoryDay(dayOffset: Int) {
+        val target = _uiState.value.historyTargetMember ?: _uiState.value.selectedMember ?: return
+        load24HourRoute(target, dayOffset)
+    }
+
     fun clear24HourRoute() {
-        _uiState.update { it.copy(activeHistoryRoute = emptyList(), historyOwnerName = null) }
+        _uiState.update {
+            it.copy(
+                activeHistoryRoute = emptyList(),
+                historyOwnerName = null,
+                historyTargetMember = null,
+                historyDayOffset = 0
+            )
+        }
     }
 
     fun ringMemberDevice(member: DecryptedMemberLocation) {
