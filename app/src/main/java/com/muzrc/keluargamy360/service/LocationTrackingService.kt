@@ -28,6 +28,7 @@ import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
+import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import com.muzrc.keluargamy360.util.PermissionHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.CoroutineScope
@@ -188,7 +189,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                 // 5. Kemas kini profil kuasa adaptif & log bateri app
                 evaluateProfileAndBattery(now, battery.level, battery.isCharging)
 
-                // 6. Muat naik ke Firestore dengan selang heartbeat adaptif mengikut bateri
+                // 6. Muat naik ke Firestore atau simpan ke barisan luar talian (Offline Route Queue)
                 val heartbeatMs = if (currentProfile == PowerProfile.STATIONARY_LOW_BATTERY) {
                     HEARTBEAT_LOW_BATTERY_MS
                 } else {
@@ -212,26 +213,41 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 serviceScope.launch {
                     try {
-                        withTimeoutOrNull(4500L) {
-                            locationRepository.uploadEncryptedLocation(
+                        val isOnline = OfflineRouteQueueHelper.isNetworkAvailable(this@LocationTrackingService)
+                        if (isOnline) {
+                            val liveSent = locationRepository.uploadEncryptedLocation(
                                 latitude = uploadLat,
                                 longitude = uploadLng,
                                 speedKmh = speedKmh,
                                 batteryLevel = battery.level,
                                 isCharging = battery.isCharging
                             )
-                            AppBatteryLogHelper.recordFirestoreUpload()
-
-                            if (isMovingNow) {
-                                val prevHist = lastHistoryLocation
-                                val histStepMeters = when (currentProfile) {
-                                    PowerProfile.MOVING_CHARGING -> 50f
-                                    PowerProfile.MOVING_HIGH_BATTERY -> 65f
-                                    else -> 80f
+                            if (liveSent) {
+                                AppBatteryLogHelper.recordFirestoreUpload()
+                                // Hantar semua titik laluan luar talian yang tertunggak sebaik internet pulih
+                                val flushedCount = locationRepository.flushOfflineRouteQueue(this@LocationTrackingService)
+                                if (flushedCount > 0) {
+                                    AppBatteryLogHelper.recordFirestoreUpload()
                                 }
-                                if (prevHist == null || prevHist.distanceTo(loc) >= histStepMeters) {
-                                    lastHistoryLocation = loc
-                                    locationRepository.appendHistoryPoint(uploadLat, uploadLng)
+                            }
+                        }
+
+                        if (isMovingNow) {
+                            val prevHist = lastHistoryLocation
+                            val histStepMeters = when (currentProfile) {
+                                PowerProfile.MOVING_CHARGING -> 50f
+                                PowerProfile.MOVING_HIGH_BATTERY -> 65f
+                                else -> 80f
+                            }
+                            if (prevHist == null || prevHist.distanceTo(loc) >= histStepMeters) {
+                                lastHistoryLocation = loc
+                                val historySent = locationRepository.appendHistoryPoint(
+                                    latitude = uploadLat,
+                                    longitude = uploadLng,
+                                    context = this@LocationTrackingService,
+                                    recordedAtMs = now
+                                )
+                                if (historySent) {
                                     AppBatteryLogHelper.recordFirestoreUpload()
                                 }
                             }
@@ -247,8 +263,8 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     /**
-     * Pemasa latar belakang bebas (setiap 60 saat) supaya log bateri app dan pertukaran
-     * mod tidur tetap berjalan walaupun telefon pegun semalaman tanpa pergerakan GPS.
+     * Pemasa latar belakang bebas (setiap 60 saat) supaya log bateri app, pertukaran mod tidur,
+     * dan penghantaran semula laluan luar talian tetap berjalan walaupun telefon pegun.
      */
     private fun startAppBatteryMonitorLoop() {
         monitorJob?.cancel()
@@ -259,6 +275,20 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
                 withContext(Dispatchers.Main) {
                     evaluateProfileAndBattery(now, battery.level, battery.isCharging)
+                }
+
+                // Jika ada rekod laluan luar talian tertunggak dan sambungan internet sudah pulih
+                if (OfflineRouteQueueHelper.isNetworkAvailable(this@LocationTrackingService)) {
+                    if (uploadMutex.tryLock()) {
+                        try {
+                            val flushed = locationRepository.flushOfflineRouteQueue(this@LocationTrackingService)
+                            if (flushed > 0) {
+                                AppBatteryLogHelper.recordFirestoreUpload()
+                            }
+                        } finally {
+                            uploadMutex.unlock()
+                        }
+                    }
                 }
             }
         }
@@ -512,7 +542,6 @@ class LocationTrackingService : Service(), SensorEventListener {
     private fun startLocationUpdates() {
         if (!PermissionHelper.hasFineLocation(this)) return
 
-        // Tanpa setMinUpdateDistanceMeters supaya selang masa & pengesan pegun sentiasa berfungsi
         val (priority, intervalMs, minUpdateMs) = when (currentProfile) {
             PowerProfile.MOVING_CHARGING ->
                 Triple(Priority.PRIORITY_HIGH_ACCURACY, 5_000L, 3_000L)

@@ -1,5 +1,6 @@
 package com.muzrc.keluargamy360.data.repository
 
+import android.content.Context
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
@@ -9,7 +10,9 @@ import com.muzrc.keluargamy360.data.model.EncryptedHistoryPoint
 import com.muzrc.keluargamy360.data.model.HistoryPoint
 import com.muzrc.keluargamy360.data.model.UserLocation
 import com.muzrc.keluargamy360.util.CryptoHelper
+import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeout
 
 class LocationRepository(
     private val secureStorage: SecureStorage,
@@ -22,10 +25,10 @@ class LocationRepository(
         speedKmh: Float,
         batteryLevel: Int,
         isCharging: Boolean
-    ) {
-        val uid = auth.currentUser?.uid ?: return
-        val familyId = secureStorage.getFamilyId() ?: return
-        val masterKey = secureStorage.getFamilyMasterKey() ?: return
+    ): Boolean {
+        val uid = auth.currentUser?.uid ?: return false
+        val familyId = secureStorage.getFamilyId() ?: return false
+        val masterKey = secureStorage.getFamilyMasterKey() ?: return false
         val now = System.currentTimeMillis()
 
         val rawPayload = "$latitude|$longitude|$speedKmh|$batteryLevel|$isCharging"
@@ -38,45 +41,64 @@ class LocationRepository(
             updatedAt = now
         )
 
-        try {
-            db.collection("families").document(familyId)
-                .collection("locations").document(uid)
-                .set(locationDoc, SetOptions.merge())
-                .await()
+        return try {
+            withTimeout(4000L) {
+                db.collection("families").document(familyId)
+                    .collection("locations").document(uid)
+                    .set(locationDoc, SetOptions.merge())
+                    .await()
 
-            db.collection("users").document(uid)
-                .update(
-                    mapOf(
-                        "batteryLevel" to batteryLevel,
-                        "isCharging" to isCharging,
-                        "lastSeen" to now
-                    )
-                ).await()
+                db.collection("users").document(uid)
+                    .update(
+                        mapOf(
+                            "batteryLevel" to batteryLevel,
+                            "isCharging" to isCharging,
+                            "lastSeen" to now
+                        )
+                    ).await()
+            }
+            true
         } catch (_: Exception) {
+            false
         }
     }
 
-    suspend fun appendHistoryPoint(latitude: Double, longitude: Double) {
-        val uid = auth.currentUser?.uid ?: return
-        val familyId = secureStorage.getFamilyId() ?: return
-        val masterKey = secureStorage.getFamilyMasterKey() ?: return
-        val now = System.currentTimeMillis()
+    /**
+     * Merakam titik laluan 24 jam. Jika tiada sambungan internet atau muat naik tamat tempoh,
+     * titik berserta cap masa asal akan disimpan dalam barisan luar talian tempatan.
+     */
+    suspend fun appendHistoryPoint(
+        latitude: Double,
+        longitude: Double,
+        context: Context? = null,
+        recordedAtMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        val uid = auth.currentUser?.uid ?: return false
+        val familyId = secureStorage.getFamilyId() ?: return false
+        val masterKey = secureStorage.getFamilyMasterKey() ?: return false
 
-        try {
+        if (context != null && !OfflineRouteQueueHelper.isNetworkAvailable(context)) {
+            OfflineRouteQueueHelper.enqueue(context, uid, familyId, latitude, longitude, recordedAtMs)
+            return false
+        }
+
+        return try {
             val enc = CryptoHelper.encrypt("$latitude|$longitude", masterKey)
             val point = EncryptedHistoryPoint(
                 uid = uid,
                 encryptedCoords = enc.ciphertextBase64,
                 iv = enc.ivBase64,
-                timestamp = now
+                timestamp = recordedAtMs
             )
-            db.collection("families").document(familyId)
-                .collection("history")
-                .add(point)
-                .await()
+            withTimeout(4000L) {
+                db.collection("families").document(familyId)
+                    .collection("history")
+                    .add(point)
+                    .await()
+            }
 
             // Padam rekod sejarah lebih lama daripada 24 jam secara automatik
-            val cutoff = now - 86_400_000L
+            val cutoff = System.currentTimeMillis() - 86_400_000L
             val oldDocs = db.collection("families").document(familyId)
                 .collection("history")
                 .whereEqualTo("uid", uid)
@@ -87,7 +109,55 @@ class LocationRepository(
             for (doc in oldDocs.documents) {
                 doc.reference.delete()
             }
+            true
         } catch (_: Exception) {
+            if (context != null) {
+                OfflineRouteQueueHelper.enqueue(context, uid, familyId, latitude, longitude, recordedAtMs)
+            }
+            false
+        }
+    }
+
+    /**
+     * Memuat naik semula semua titik laluan yang tertunggak semasa luar talian secara berkelompok
+     * (1 WriteBatch untuk sehingga 50 titik sekaligus) sebaik sambungan internet pulih.
+     */
+    suspend fun flushOfflineRouteQueue(context: Context): Int {
+        val uid = auth.currentUser?.uid ?: return 0
+        val familyId = secureStorage.getFamilyId() ?: return 0
+        val masterKey = secureStorage.getFamilyMasterKey() ?: return 0
+
+        if (!OfflineRouteQueueHelper.isNetworkAvailable(context)) return 0
+
+        val pending = OfflineRouteQueueHelper.peekAll(context)
+            .filter { it.uid == uid && it.familyId == familyId }
+        if (pending.isEmpty()) return 0
+
+        val batchSlice = pending.take(50)
+        return try {
+            val batch = db.batch()
+            val historyRef = db.collection("families").document(familyId).collection("history")
+            val uploadedTimestamps = mutableSetOf<Long>()
+
+            for (item in batchSlice) {
+                val enc = CryptoHelper.encrypt("${item.latitude}|${item.longitude}", masterKey)
+                val point = EncryptedHistoryPoint(
+                    uid = item.uid,
+                    encryptedCoords = enc.ciphertextBase64,
+                    iv = enc.ivBase64,
+                    timestamp = item.timestamp
+                )
+                batch.set(historyRef.document(), point)
+                uploadedTimestamps.add(item.timestamp)
+            }
+
+            withTimeout(6000L) {
+                batch.commit().await()
+            }
+            OfflineRouteQueueHelper.removeUploadedTimestamps(context, uploadedTimestamps)
+            uploadedTimestamps.size
+        } catch (_: Exception) {
+            0
         }
     }
 
