@@ -18,8 +18,8 @@ data class QueuedRoutePoint(
 object OfflineRouteQueueHelper {
 
     private const val QUEUE_FILE_NAME = "offline_route_queue.json"
-    private const val MAX_QUEUE_POINTS = 500
-    private const val MAX_AGE_MS = 86_400_000L // 24 jam
+    private const val MAX_QUEUE_POINTS = 1500
+    private const val MAX_AGE_MS = 7L * 86_400_000L // 7 hari
     private val lock = Any()
 
     fun isNetworkAvailable(context: Context): Boolean {
