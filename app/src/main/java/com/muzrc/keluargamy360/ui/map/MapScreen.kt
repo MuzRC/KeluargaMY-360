@@ -63,7 +63,10 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private const val SATELLITE_STYLE_JSON = """
 {
@@ -140,8 +143,44 @@ private data class MemberAnimPlan(
     val startLng: Double,
     val targetLat: Double,
     val targetLng: Double,
-    val durationMs: Long
+    val travelDurationMs: Long,
+    val deadReckonLat: Double,
+    val deadReckonLng: Double,
+    val totalDurationMs: Long
 )
+
+/**
+ * Mengira titik unjuran ke hadapan (Dead Reckoning) berdasarkan arah perjalanan (bearing)
+ * dan kelajuan semasa, dihadkan maksimum 25 meter supaya ikon tidak terlajak jauh di selekoh tajam.
+ */
+private fun projectDeadReckoning(
+    fromLat: Double,
+    fromLng: Double,
+    toLat: Double,
+    toLng: Double,
+    speedKmh: Float,
+    projectionSeconds: Float = 1.4f
+): Pair<Double, Double> {
+    if (speedKmh < 8f) return toLat to toLng
+
+    val dLatRad = Math.toRadians(toLat - fromLat)
+    val dLngRad = Math.toRadians(toLng - fromLng)
+    val avgLatRad = Math.toRadians((fromLat + toLat) * 0.5)
+    val x = dLngRad * cos(avgLatRad)
+    val y = dLatRad
+    if (x == 0.0 && y == 0.0) return toLat to toLng
+
+    val bearingRad = atan2(x, y) // 0 = Utara, PI/2 = Timur
+    val speedMps = (speedKmh / 3.6f) * 0.75f // 75% kelajuan sebenar untuk luncuran lembut
+    val lookaheadMeters = (speedMps * projectionSeconds).coerceIn(0f, 25f)
+    if (lookaheadMeters < 1.5f) return toLat to toLng
+
+    val earthRadius = 6378137.0
+    val deltaLat = (lookaheadMeters * cos(bearingRad)) / earthRadius
+    val deltaLng = (lookaheadMeters * sin(bearingRad)) / (earthRadius * cos(Math.toRadians(toLat)))
+
+    return (toLat + Math.toDegrees(deltaLat)) to (toLng + Math.toDegrees(deltaLng))
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -274,13 +313,16 @@ fun MapScreen(
                 val arrivalDeltaMs = if (isNewCoordinate) {
                     lastTargetCoords[m.uid] = targetPair
                     lastCoordArrivalMs[m.uid] = nowElapsed
-                    (nowElapsed - prevArrival).coerceIn(2000L, 12000L)
+                    (nowElapsed - prevArrival).coerceIn(2200L, 10000L)
                 } else {
-                    4000L
+                    3500L
                 }
 
                 if (prevRendered == null) {
-                    m.uid to MemberAnimPlan(m.latitude, m.longitude, m.latitude, m.longitude, 0L)
+                    m.uid to MemberAnimPlan(
+                        m.latitude, m.longitude, m.latitude, m.longitude, 0L,
+                        m.latitude, m.longitude, 0L
+                    )
                 } else {
                     Location.distanceBetween(
                         prevRendered.first,
@@ -292,36 +334,55 @@ fun MapScreen(
                     val distanceMeters = distBuffer[0]
 
                     when {
-                        distanceMeters > 5000f || distanceMeters < 1.5f -> {
-                            m.uid to MemberAnimPlan(m.latitude, m.longitude, m.latitude, m.longitude, 0L)
+                        distanceMeters > 5000f || distanceMeters < 1.2f -> {
+                            m.uid to MemberAnimPlan(
+                                m.latitude, m.longitude, m.latitude, m.longitude, 0L,
+                                m.latitude, m.longitude, 0L
+                            )
                         }
-                        m.speedKmh > 3f -> {
+                        m.speedKmh >= 8f && distanceMeters <= 400f -> {
                             val speedMps = (m.speedKmh / 3.6f).coerceAtLeast(1f)
                             val physicsDurationMs = ((distanceMeters / speedMps) * 1000f).toLong()
-                            val smoothDuration = maxOf(physicsDurationMs, arrivalDeltaMs).coerceIn(2500L, 10000L)
+                            val travelMs = maxOf(physicsDurationMs, arrivalDeltaMs).coerceIn(2200L, 8500L)
+                            // Unjuran arah ke hadapan (Dead Reckoning 1.4s) supaya pin tidak tertinggal di belakang
+                            val (drLat, drLng) = projectDeadReckoning(
+                                fromLat = prevRendered.first,
+                                fromLng = prevRendered.second,
+                                toLat = m.latitude,
+                                toLng = m.longitude,
+                                speedKmh = m.speedKmh,
+                                projectionSeconds = 1.4f
+                            )
+                            val drExtraMs = if (drLat != m.latitude || drLng != m.longitude) 1400L else 0L
                             m.uid to MemberAnimPlan(
                                 startLat = prevRendered.first,
                                 startLng = prevRendered.second,
                                 targetLat = m.latitude,
                                 targetLng = m.longitude,
-                                durationMs = smoothDuration
+                                travelDurationMs = travelMs,
+                                deadReckonLat = drLat,
+                                deadReckonLng = drLng,
+                                totalDurationMs = travelMs + drExtraMs
                             )
                         }
                         else -> {
-                            val smoothDuration = arrivalDeltaMs.coerceIn(2500L, 8000L)
+                            val travelMs = arrivalDeltaMs.coerceIn(2200L, 7500L)
                             m.uid to MemberAnimPlan(
                                 startLat = prevRendered.first,
                                 startLng = prevRendered.second,
                                 targetLat = m.latitude,
                                 targetLng = m.longitude,
-                                durationMs = smoothDuration
+                                travelDurationMs = travelMs,
+                                deadReckonLat = m.latitude,
+                                deadReckonLng = m.longitude,
+                                totalDurationMs = travelMs
                             )
                         }
                     }
                 }
             }
 
-            val maxDuration = animPlans.values.maxOfOrNull { it.durationMs } ?: 0L
+            val maxDuration = animPlans.values.maxOfOrNull { it.totalDurationMs } ?: 0L
 
             if (maxDuration <= 0L) {
                 targetMembers.forEach { m ->
@@ -334,37 +395,60 @@ fun MapScreen(
                     }
                 }
             } else {
+                var lastGeoJsonPushMs = 0L
+                var lastCameraPushMs = 0L
+
                 val animator = ValueAnimator.ofFloat(0f, maxDuration.toFloat()).apply {
                     duration = maxDuration
                     interpolator = LinearInterpolator()
                     addUpdateListener { anim ->
+                        val tickNow = SystemClock.elapsedRealtime()
+                        val isFinalFrame = anim.animatedFraction >= 0.995f
+                        // Hadkan kemas kini GeoJSON kepada ~30 FPS (33ms) supaya benang latar MapLibre kekal ringan
+                        if (!isFinalFrame && (tickNow - lastGeoJsonPushMs) < 33L) return@addUpdateListener
+                        lastGeoJsonPushMs = tickNow
+
                         val elapsed = (anim.animatedValue as Float).toLong()
                         val currentList = latestMembers
                         var followedLatLng: LatLng? = null
 
-                        val interpolatedList = currentList.map { m ->
+                        val interpolatedList = ArrayList<DecryptedMemberLocation>(currentList.size)
+                        for (m in currentList) {
                             val plan = animPlans[m.uid]
-                            if (plan == null || plan.durationMs <= 0L) {
+                            if (plan == null || plan.totalDurationMs <= 0L) {
                                 renderedCoords[m.uid] = m.latitude to m.longitude
                                 if (m.uid == latestSelectedUid) {
                                     followedLatLng = LatLng(m.latitude, m.longitude)
                                 }
-                                m
-                            } else {
-                                val fraction = (elapsed.toFloat() / plan.durationMs.toFloat()).coerceIn(0f, 1f)
+                                interpolatedList.add(m)
+                            } else if (elapsed <= plan.travelDurationMs || plan.totalDurationMs <= plan.travelDurationMs) {
+                                val fraction = (elapsed.toFloat() / plan.travelDurationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
                                 val curLat = plan.startLat + (plan.targetLat - plan.startLat) * fraction
                                 val curLng = plan.startLng + (plan.targetLng - plan.startLng) * fraction
                                 renderedCoords[m.uid] = curLat to curLng
                                 if (m.uid == latestSelectedUid) {
                                     followedLatLng = LatLng(curLat, curLng)
                                 }
-                                m.copy(latitude = curLat, longitude = curLng)
+                                interpolatedList.add(m.copy(latitude = curLat, longitude = curLng))
+                            } else {
+                                // Fasa Unjuran Arah Ke Hadapan (Dead Reckoning) sementara menunggu paket GPS seterusnya
+                                val drSpan = (plan.totalDurationMs - plan.travelDurationMs).coerceAtLeast(1L)
+                                val drFraction = ((elapsed - plan.travelDurationMs).toFloat() / drSpan.toFloat()).coerceIn(0f, 1f)
+                                val curLat = plan.targetLat + (plan.deadReckonLat - plan.targetLat) * drFraction
+                                val curLng = plan.targetLng + (plan.deadReckonLng - plan.targetLng) * drFraction
+                                renderedCoords[m.uid] = curLat to curLng
+                                if (m.uid == latestSelectedUid) {
+                                    followedLatLng = LatLng(curLat, curLng)
+                                }
+                                interpolatedList.add(m.copy(latitude = curLat, longitude = curLng))
                             }
                         }
 
                         MapMarkerHelper.updateMembers(map, interpolatedList)
 
-                        if (latestIsFollowing) {
+                        // Hadkan pergerakan kamera kepada ~22 FPS (45ms) untuk elak kamera tersangkut
+                        if (latestIsFollowing && (isFinalFrame || (tickNow - lastCameraPushMs) >= 45L)) {
+                            lastCameraPushMs = tickNow
                             followedLatLng?.let { pos ->
                                 map.moveCamera(CameraUpdateFactory.newLatLng(pos))
                             }
@@ -791,15 +875,22 @@ fun MapScreen(
                             Lifecycle.Event.ON_RESUME -> {
                                 mapView.onResume()
                                 hasBatteryExemption = PermissionHelper.isIgnoringBatteryOptimizations(context)
+                                viewModel.notifyActiveViewing(true)
                             }
-                            Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                            Lifecycle.Event.ON_PAUSE -> {
+                                viewModel.notifyActiveViewing(false)
+                                mapView.onPause()
+                            }
                             Lifecycle.Event.ON_STOP -> mapView.onStop()
                             Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
                             else -> Unit
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
-                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                    onDispose {
+                        viewModel.notifyActiveViewing(false)
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                    }
                 }
 
                 AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())

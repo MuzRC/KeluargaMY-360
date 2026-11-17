@@ -24,6 +24,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
 import com.muzrc.keluargamy360.KeluargaApp
 import com.muzrc.keluargamy360.MainActivity
 import com.muzrc.keluargamy360.R
@@ -55,6 +57,7 @@ import kotlin.math.sqrt
 class LocationTrackingService : Service(), SensorEventListener {
 
     private enum class PowerProfile {
+        ACTIVE_VIEWING,         // Ahli sedang melihat peta secara langsung: GPS 2.5s (had 10 minit)
         MOVING_CHARGING,        // Bergerak + Dicas: Ultra-agresif GPS 5s
         MOVING_HIGH_BATTERY,    // Bergerak + Bateri >= 50%: Agresif GPS 8s
         MOVING_MEDIUM_BATTERY,  // Bergerak + Bateri 20%-49%: Seimbang GPS 15s
@@ -103,6 +106,10 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastSpeedAlertTimeMs: Long = 0L
     private var lastCrashTriggerTimeMs: Long = 0L
 
+    // Mod Active Viewing (GPS 2.5s automatik luput selepas 10 minit)
+    private var familyWatchListener: ListenerRegistration? = null
+    @Volatile private var activeViewingUntilMs: Long = 0L
+
     override fun onCreate() {
         super.onCreate()
         secureStorage = SecureStorage(this)
@@ -123,7 +130,8 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
 
                 // Rekod aktiviti GPS khusus app kita mengikut ketepatan semasa
-                val isHighAccProfile = currentProfile == PowerProfile.MOVING_CHARGING ||
+                val isHighAccProfile = currentProfile == PowerProfile.ACTIVE_VIEWING ||
+                        currentProfile == PowerProfile.MOVING_CHARGING ||
                         currentProfile == PowerProfile.MOVING_HIGH_BATTERY ||
                         currentProfile == PowerProfile.MOVING_MEDIUM_BATTERY
                 AppBatteryLogHelper.recordGpsFix(isHighAccuracy = isHighAccProfile)
@@ -295,7 +303,53 @@ class LocationTrackingService : Service(), SensorEventListener {
             }
         }
 
+        setupActiveViewingListener()
         startAppBatteryMonitorLoop()
+    }
+
+    /**
+     * Mendengar isyarat Active Viewing pada dokumen keluarga.
+     * Apabila ahli lain membuka tab Peta, GPS dinaikkan kepada 2.5s sehingga maksimum 10 minit,
+     * dan automatik kembali ke profil jimat bateri sebaik tamat tempoh atau peta ditutup.
+     */
+    private fun setupActiveViewingListener() {
+        val familyId = secureStorage.getFamilyId() ?: return
+        val myUid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        familyWatchListener?.remove()
+        familyWatchListener = FirebaseFirestore.getInstance()
+            .collection("families")
+            .document(familyId)
+            .addSnapshotListener { snap, _ ->
+                if (snap == null || !snap.exists()) return@addSnapshotListener
+                val untilMs = snap.getLong("activeViewingUntil") ?: 0L
+                val viewerUid = snap.getString("activeViewerUid").orEmpty()
+                val now = System.currentTimeMillis()
+
+                // Hanya aktifkan jika ahli LAIN yang sedang melihat peta & belum melebihi had 10 minit
+                val cappedUntil = if (viewerUid.isNotBlank() && viewerUid != myUid && untilMs > now) {
+                    minOf(untilMs, now + ACTIVE_VIEWING_MAX_MS)
+                } else {
+                    0L
+                }
+
+                val wasActive = activeViewingUntilMs > now
+                val isNowActive = cappedUntil > now
+                activeViewingUntilMs = cappedUntil
+
+                if (wasActive != isNowActive) {
+                    AppDiagnosticLogHelper.logServiceLifecycle(
+                        context = this,
+                        eventTitle = if (isNowActive) {
+                            "Mod Active Viewing Aktif (GPS 2.5s)"
+                        } else {
+                            "Mod Active Viewing Tamat -> Kembali Jimat Bateri"
+                        },
+                        extraDetail = if (isNowActive) "Had masa automatik: 10 minit" else "Tamat tempoh / Peta ditutup"
+                    )
+                    val battery = BatteryHelper.getBatteryStatus(this)
+                    evaluateProfileAndBattery(now, battery.level, battery.isCharging)
+                }
+            }
     }
 
     private fun hasActivityRecognitionPermission(): Boolean {
@@ -520,6 +574,12 @@ class LocationTrackingService : Service(), SensorEventListener {
         batteryLevel: Int,
         isCharging: Boolean
     ): PowerProfile {
+        val now = System.currentTimeMillis()
+        val isActiveViewing = now < activeViewingUntilMs && (batteryLevel >= 15 || isCharging)
+        if (isActiveViewing) {
+            return PowerProfile.ACTIVE_VIEWING
+        }
+
         return if (isStationary) {
             if (batteryLevel < 20 && !isCharging) {
                 PowerProfile.STATIONARY_LOW_BATTERY
@@ -745,6 +805,8 @@ class LocationTrackingService : Service(), SensorEventListener {
         if (!PermissionHelper.hasFineLocation(this)) return
 
         val (priority, intervalMs, minUpdateMs) = when (currentProfile) {
+            PowerProfile.ACTIVE_VIEWING ->
+                Triple(Priority.PRIORITY_HIGH_ACCURACY, 2_500L, 1_500L)
             PowerProfile.MOVING_CHARGING ->
                 Triple(Priority.PRIORITY_HIGH_ACCURACY, 5_000L, 3_000L)
             PowerProfile.MOVING_HIGH_BATTERY ->
@@ -804,6 +866,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        familyWatchListener?.remove()
         monitorJob?.cancel()
         teardownActivityRecognition()
         AppDiagnosticLogHelper.flushGpsDriftSummary(this)
@@ -836,6 +899,7 @@ class LocationTrackingService : Service(), SensorEventListener {
         private const val SUSTAINED_WAKEUP_MS = 8_000L              // Sandaran accelerometer: gerakan berterusan 8s
         private const val HEARTBEAT_NORMAL_MS = 300_000L            // Hantar status pegun setiap 5 minit
         private const val HEARTBEAT_LOW_BATTERY_MS = 600_000L       // Hantar status pegun setiap 10 minit (<20%)
+        private const val ACTIVE_VIEWING_MAX_MS = 600_000L          // Had maksimum Active Viewing: 10 minit
         private const val APP_BATTERY_LOG_INTERVAL_MS = 1_800_000L  // Rekod statistik tenaga app setiap 30 minit
         private const val MIN_DISPLACEMENT_METERS = 25f             // Abaikan getaran GPS bawah 25 meter
 

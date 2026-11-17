@@ -100,6 +100,7 @@ class MapViewModel(
     private val userProfilesCache = ConcurrentHashMap<String, User>()
     private val addressCache = ConcurrentHashMap<String, String>()
     private val sessionStartTime = System.currentTimeMillis()
+    private var lastActiveViewSentMs: Long = 0L
 
     val currentUserId: String
         get() = auth.currentUser?.uid.orEmpty()
@@ -741,6 +742,52 @@ class MapViewModel(
             .build()
 
         client.addGeofences(request, pendingIntent)
+    }
+
+    /**
+     * Memaklumkan pelayan bahawa pengguna sedang membuka atau menutup skrin Peta.
+     * Mencetuskan mod GPS 2.5s (Active Viewing) pada telefon ahli keluarga dengan had masa 10 minit
+     * dan penampan tulis (throttle 3 minit) supaya kuota Firebase kekal rendah.
+     */
+    fun notifyActiveViewing(isViewing: Boolean) {
+        val familyId = secureStorage.getFamilyId() ?: return
+        val uid = currentUserId
+        if (uid.isBlank()) return
+
+        val now = System.currentTimeMillis()
+        if (isViewing) {
+            // Jangan tulis berulang jika sesi Active Viewing baru sahaja dihantar < 3 minit lalu
+            if (now - lastActiveViewSentMs < 180_000L) return
+            lastActiveViewSentMs = now
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    db.collection("families").document(familyId)
+                        .update(
+                            mapOf(
+                                "activeViewingUntil" to (now + 600_000L), // Had automatik 10 minit
+                                "activeViewerUid" to uid
+                            )
+                        )
+                        .await()
+                } catch (_: Exception) {
+                }
+            }
+        } else {
+            lastActiveViewSentMs = 0L
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    db.collection("families").document(familyId)
+                        .update(
+                            mapOf(
+                                "activeViewingUntil" to 0L,
+                                "activeViewerUid" to ""
+                            )
+                        )
+                        .await()
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     fun clearStatusMessage() {
