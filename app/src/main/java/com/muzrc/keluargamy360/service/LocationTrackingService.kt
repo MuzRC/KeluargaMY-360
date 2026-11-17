@@ -499,14 +499,17 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     private fun evaluatePrivateZonesByGps(loc: Location, now: Long) {
-        val privatePlaces = secureStorage.getPrivatePlaces()
-        if (privatePlaces.isEmpty()) return
+        val allPlaces = secureStorage.getPrivatePlaces() + secureStorage.getFamilyPlaces()
+        if (allPlaces.isEmpty()) return
 
         val statePrefs = getSharedPreferences("keluargamy360_private_zone_state", Context.MODE_PRIVATE)
         val cooldownPrefs = getSharedPreferences("keluargamy360_geofence_cooldown", Context.MODE_PRIVATE)
         val distanceResult = FloatArray(1)
+        val userName = FirebaseAuth.getInstance().currentUser?.displayName?.takeIf { it.isNotBlank() }
+            ?: secureStorage.getCachedUserName()
+            ?: "Ahli Keluarga"
 
-        for (place in privatePlaces) {
+        for (place in allPlaces) {
             Location.distanceBetween(
                 loc.latitude,
                 loc.longitude,
@@ -543,13 +546,35 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 if (now - lastTriggered >= 600_000L) {
                     cooldownPrefs.edit().putLong(cooldownKey, now).apply()
-                    PrivateZoneLogHelper.appendEvent(this, place.name, isInsideNow)
-                    val msg = if (isInsideNow) {
-                        "Anda telah tiba di zon peribadi: ${place.name}."
+                    if (place.isPrivate) {
+                        PrivateZoneLogHelper.appendEvent(this, place.name, isInsideNow)
+                        val msg = if (isInsideNow) {
+                            "Anda telah tiba di zon peribadi: ${place.name}."
+                        } else {
+                            "Anda telah keluar dari zon peribadi: ${place.name}."
+                        }
+                        showPrivateZoneNotification("Zon Peribadi: ${place.name}", msg)
                     } else {
-                        "Anda telah keluar dari zon peribadi: ${place.name}."
+                        val localMsg = if (isInsideNow) {
+                            "Anda telah tiba di zon selamat: ${place.name}."
+                        } else {
+                            "Anda telah keluar dari zon selamat: ${place.name}."
+                        }
+                        val familyMsg = if (isInsideNow) {
+                            "[MASUK] $userName telah tiba di zon selamat: ${place.name}."
+                        } else {
+                            "[KELUAR] $userName telah keluar dari zon selamat: ${place.name}."
+                        }
+                        showPrivateZoneNotification("Kemas Kini Zon: ${place.name}", localMsg)
+                        serviceScope.launch {
+                            withTimeoutOrNull(4500L) {
+                                locationRepository.postFamilyAlert(
+                                    type = "GEOFENCE",
+                                    message = familyMsg
+                                )
+                            }
+                        }
                     }
-                    showPrivateZoneNotification(place.name, msg)
                 }
             }
         }
@@ -572,7 +597,7 @@ class LocationTrackingService : Service(), SensorEventListener {
 
         val notification = NotificationCompat.Builder(this, KeluargaApp.CHANNEL_GEOFENCE_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_map)
-            .setContentTitle("Zon Peribadi: $title")
+            .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)

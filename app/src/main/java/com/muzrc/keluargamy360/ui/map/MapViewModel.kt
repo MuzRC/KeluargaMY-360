@@ -139,7 +139,12 @@ class MapViewModel(
                 group?.memberIds?.map { memberUid ->
                     async {
                         val uDoc = db.collection("users").document(memberUid).get().await()
-                        uDoc.toObject(User::class.java)?.let { userProfilesCache[memberUid] = it }
+                        uDoc.toObject(User::class.java)?.let { u ->
+                            userProfilesCache[memberUid] = u
+                            if (memberUid == currentUserId && u.name.isNotBlank()) {
+                                secureStorage.saveCachedUserName(u.name)
+                            }
+                        }
                     }
                 }?.awaitAll()
 
@@ -261,6 +266,7 @@ class MapViewModel(
                 val familyPlaces = snapshot.documents.mapNotNull {
                     it.toObject(SafePlace::class.java)?.copy(isPrivate = false)
                 }
+                secureStorage.saveFamilyPlaces(familyPlaces)
                 val combinedPlaces = familyPlaces + secureStorage.getPrivatePlaces()
                 _uiState.update { it.copy(safePlaces = combinedPlaces) }
                 registerSystemGeofences(combinedPlaces)
@@ -271,7 +277,7 @@ class MapViewModel(
         alertsListener = db.collection("families").document(familyId)
             .collection("alerts")
             .orderBy("timestamp", Query.Direction.DESCENDING)
-            .limit(40)
+            .limit(100)
             .addSnapshotListener { snapshot, _ ->
                 if (snapshot == null) return@addSnapshotListener
 
@@ -489,7 +495,8 @@ class MapViewModel(
         if (cleanName.isBlank()) return
         val uid = currentUserId
 
-        // Kemas kini UI tempatan secara masa nyata serta-merta
+        // Kemas kini UI tempatan & cache nama latar belakang secara masa nyata serta-merta
+        secureStorage.saveCachedUserName(cleanName)
         userProfilesCache[uid] = (userProfilesCache[uid] ?: User(uid = uid)).copy(name = cleanName)
         val effectiveName = resolveEffectiveDisplayName(uid, cleanName)
         _uiState.update { state ->

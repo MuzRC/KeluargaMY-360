@@ -36,17 +36,23 @@ class GeofenceReceiver : BroadcastReceiver() {
         val triggeringGeofences = geofencingEvent.triggeringGeofences ?: return
         val secureStorage = SecureStorage(context)
         val locationRepo = LocationRepository(secureStorage)
-        val userName = FirebaseAuth.getInstance().currentUser?.displayName ?: "Ahli Keluarga"
+        val userName = FirebaseAuth.getInstance().currentUser?.displayName?.takeIf { it.isNotBlank() }
+            ?: secureStorage.getCachedUserName()
+            ?: "Ahli Keluarga"
         val cooldownPrefs = context.getSharedPreferences("keluargamy360_geofence_cooldown", Context.MODE_PRIVATE)
         val statePrefs = context.getSharedPreferences("keluargamy360_private_zone_state", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
+
+        val privatePlaces = secureStorage.getPrivatePlaces()
+        val familyPlaces = secureStorage.getFamilyPlaces()
+        val pendingFamilyAlerts = mutableListOf<String>()
 
         for (geofence in triggeringGeofences) {
             val placeName = geofence.requestId
             val eventKey = "${placeName}_$transition"
             val lastTriggered = cooldownPrefs.getLong(eventKey, 0L)
 
-            // Penampan masa 10 minit (600,000 ms) untuk elak notifikasi berulang di sempadan zon
+            // Penampan masa 10 minit (600,000 ms) untuk elak rekod berulang di sempadan zon
             if (now - lastTriggered < 600_000L) continue
             cooldownPrefs.edit().putLong(eventKey, now).apply()
 
@@ -56,26 +62,36 @@ class GeofenceReceiver : BroadcastReceiver() {
                 "Anda telah keluar dari zon selamat: $placeName."
             }
             val familyMsg = if (isEnter) {
-                "$userName telah tiba di zon $placeName."
+                "[MASUK] $userName telah tiba di zon selamat: $placeName."
             } else {
-                "$userName telah keluar dari zon $placeName."
+                "[KELUAR] $userName telah keluar dari zon selamat: $placeName."
             }
 
             showGeofenceNotification(context, placeName, localMsg)
 
-            val privatePlace = secureStorage.getPrivatePlaces().find { it.name == placeName }
+            val privatePlace = privatePlaces.find { it.name == placeName }
             if (privatePlace != null) {
                 // Rekod terus ke fail .txt tempatan (tidak dihantar ke pelayan keluarga)
                 statePrefs.edit().putBoolean("inside_${privatePlace.placeId}", isEnter).apply()
                 PrivateZoneLogHelper.appendEvent(context, placeName, isEnter)
             } else {
-                val pendingResult = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        locationRepo.postFamilyAlert(type = "GEOFENCE", message = familyMsg)
-                    } finally {
-                        pendingResult.finish()
+                val familyPlace = familyPlaces.find { it.name == placeName }
+                if (familyPlace != null) {
+                    statePrefs.edit().putBoolean("inside_${familyPlace.placeId}", isEnter).apply()
+                }
+                pendingFamilyAlerts.add(familyMsg)
+            }
+        }
+
+        if (pendingFamilyAlerts.isNotEmpty()) {
+            val pendingResult = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    for (msg in pendingFamilyAlerts) {
+                        locationRepo.postFamilyAlert(type = "GEOFENCE", message = msg)
                     }
+                } finally {
+                    pendingResult.finish()
                 }
             }
         }

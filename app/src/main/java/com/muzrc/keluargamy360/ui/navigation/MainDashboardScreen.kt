@@ -80,6 +80,7 @@ fun MainDashboardScreen(
 
     // Penapis tab Selamat: 0 = Log Keluarga, 1 = Zon Peribadi (.txt), 2 = Bateri App (.txt)
     var safetyLogMode by remember { mutableIntStateOf(0) }
+    var familyZoneOnlyFilter by remember { mutableStateOf(false) }
     var privateLogs by remember { mutableStateOf(PrivateZoneLogHelper.readLogs(context)) }
     var appBatteryLogs by remember { mutableStateOf(AppBatteryLogHelper.readLogs(context)) }
     var batterySinceCharge by remember { mutableStateOf(AppBatteryLogHelper.getUsageSinceLastCharge(context)) }
@@ -722,32 +723,84 @@ fun MainDashboardScreen(
 
                         when (safetyLogMode) {
                             0 -> {
-                                Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                Spacer(Modifier.height(8.dp))
+                                val displayedFamilyLogs = remember(uiState.activityLogs, familyZoneOnlyFilter) {
+                                    if (familyZoneOnlyFilter) {
+                                        uiState.activityLogs.filter { it.type == "GEOFENCE" }
+                                    } else {
+                                        uiState.activityLogs
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (familyZoneOnlyFilter) "Sejarah Zon Selamat Keluarga" else "Log Aktiviti Keluarga",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    FilterChip(
+                                        selected = familyZoneOnlyFilter,
+                                        onClick = { familyZoneOnlyFilter = !familyZoneOnlyFilter },
+                                        label = { Text("Zon Sahaja", style = MaterialTheme.typography.labelSmall) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Place,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                    )
+                                }
+                                Spacer(Modifier.height(6.dp))
 
-                                if (uiState.activityLogs.isEmpty()) {
+                                if (displayedFamilyLogs.isEmpty()) {
                                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        Text("Belum ada rekod aktiviti keluarga hari ini.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(
+                                            if (familyZoneOnlyFilter) {
+                                                "Belum ada rekod masuk atau keluar zon selamat keluarga."
+                                            } else {
+                                                "Belum ada rekod aktiviti keluarga hari ini."
+                                            },
+                                            textAlign = TextAlign.Center,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 } else {
                                     val formatter = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
                                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-                                        items(uiState.activityLogs, key = { it.id }) { log ->
-                                            val icon = when (log.type) {
-                                                "SOS" -> Icons.Default.Warning
-                                                "CHECKIN" -> Icons.Default.CheckCircle
-                                                "BATTERY" -> Icons.Default.BatteryAlert
-                                                "SPEED" -> Icons.Default.Speed
-                                                "GEOFENCE" -> Icons.Default.Place
-                                                "RING" -> Icons.Default.NotificationsActive
+                                        items(displayedFamilyLogs, key = { it.id }) { log ->
+                                            val isZoneEnter = log.type == "GEOFENCE" && (
+                                                log.message.startsWith("[MASUK]") || log.message.contains("telah tiba")
+                                            )
+                                            val isZoneExit = log.type == "GEOFENCE" && (
+                                                log.message.startsWith("[KELUAR]") || log.message.contains("telah keluar")
+                                            )
+                                            val icon = when {
+                                                isZoneEnter -> Icons.Default.Login
+                                                isZoneExit -> Icons.Default.Logout
+                                                log.type == "SOS" -> Icons.Default.Warning
+                                                log.type == "CHECKIN" -> Icons.Default.CheckCircle
+                                                log.type == "BATTERY" -> Icons.Default.BatteryAlert
+                                                log.type == "SPEED" -> Icons.Default.Speed
+                                                log.type == "GEOFENCE" -> Icons.Default.Place
+                                                log.type == "RING" -> Icons.Default.NotificationsActive
                                                 else -> Icons.Default.Info
+                                            }
+                                            val iconTint = when {
+                                                isZoneEnter -> Color(0xFF2E7D32)
+                                                isZoneExit -> Color(0xFFE65100)
+                                                log.type == "SOS" -> Color.Red
+                                                else -> MaterialTheme.colorScheme.primary
                                             }
                                             Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                                                 Row(
                                                     modifier = Modifier.padding(12.dp).fillMaxWidth(),
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+                                                    Icon(icon, null, tint = iconTint)
                                                     Spacer(Modifier.width(12.dp))
                                                     Column(modifier = Modifier.weight(1f)) {
                                                         Text(log.message, style = MaterialTheme.typography.bodyMedium)

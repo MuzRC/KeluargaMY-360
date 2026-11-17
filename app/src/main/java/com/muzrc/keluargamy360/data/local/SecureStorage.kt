@@ -101,6 +101,52 @@ class SecureStorage(context: Context) {
         }
     }
 
+    fun saveCachedUserName(name: String) {
+        val clean = name.trim()
+        if (clean.isNotEmpty()) {
+            prefs.edit().putString(KEY_CACHED_USER_NAME, clean).apply()
+        }
+    }
+
+    fun getCachedUserName(): String? = prefs.getString(KEY_CACHED_USER_NAME, null)
+
+    fun saveFamilyPlaces(places: List<SafePlace>) {
+        val array = JSONArray()
+        places.forEach { p ->
+            val obj = JSONObject().apply {
+                put("placeId", p.placeId)
+                put("name", p.name)
+                put("latitude", p.latitude)
+                put("longitude", p.longitude)
+                put("radiusMeters", p.radiusMeters.toDouble())
+                put("createdBy", p.createdBy)
+            }
+            array.put(obj)
+        }
+        prefs.edit().putString(KEY_FAMILY_PLACES, array.toString()).apply()
+    }
+
+    fun getFamilyPlaces(): List<SafePlace> {
+        val raw = prefs.getString(KEY_FAMILY_PLACES, null) ?: return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                SafePlace(
+                    placeId = obj.getString("placeId"),
+                    name = obj.getString("name"),
+                    latitude = obj.getDouble("latitude"),
+                    longitude = obj.getDouble("longitude"),
+                    radiusMeters = obj.getDouble("radiusMeters").toFloat(),
+                    createdBy = obj.optString("createdBy", ""),
+                    isPrivate = false
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun savePrivatePlaces(places: List<SafePlace>) {
         val array = JSONArray()
         places.forEach { p ->
@@ -161,6 +207,8 @@ class SecureStorage(context: Context) {
         private const val KEY_SPEED_ALERT_ENABLED = "speed_alert_enabled"
         private const val KEY_SPEED_LIMIT_KMH = "speed_limit_kmh"
         private const val KEY_CRASH_DETECTION = "crash_detection_enabled"
+        private const val KEY_CACHED_USER_NAME = "cached_user_display_name"
+        private const val KEY_FAMILY_PLACES = "family_safe_places"
         private const val KEY_PRIVATE_PLACES = "private_safe_places"
         private const val KEY_MEMBER_NICKNAMES = "member_custom_nicknames"
     }
