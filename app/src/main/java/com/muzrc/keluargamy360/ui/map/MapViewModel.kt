@@ -51,6 +51,7 @@ data class MapUiState(
     val familyGroup: FamilyGroup? = null,
     val members: List<DecryptedMemberLocation> = emptyList(),
     val selectedMember: DecryptedMemberLocation? = null,
+    val memberNicknames: Map<String, String> = emptyMap(),
     val safePlaces: List<SafePlace> = emptyList(),
     val activityLogs: List<ActivityLogItem> = emptyList(),
     val activeHistoryRoute: List<HistoryPoint> = emptyList(),
@@ -77,6 +78,7 @@ class MapViewModel(
 
     private val _uiState = MutableStateFlow(
         MapUiState(
+            memberNicknames = secureStorage.getMemberNicknames(),
             isTrackingEnabled = secureStorage.isTrackingEnabled(),
             lowBatteryAlertEnabled = secureStorage.isLowBatteryAlertEnabled(),
             speedAlertEnabled = secureStorage.isSpeedAlertEnabled(),
@@ -99,6 +101,11 @@ class MapViewModel(
 
     init {
         startRealtimeListeners()
+    }
+
+    private fun resolveEffectiveDisplayName(uid: String, accountName: String): String {
+        val customNickname = _uiState.value.memberNicknames[uid]?.trim()
+        return if (!customNickname.isNullOrEmpty()) customNickname else accountName
     }
 
     private fun isVpnOrSlowNetwork(): Boolean {
@@ -130,6 +137,23 @@ class MapViewModel(
                         uDoc.toObject(User::class.java)?.let { userProfilesCache[memberUid] = it }
                     }
                 }?.awaitAll()
+
+                // Segarkan nama ahli di UI sebaik profil dari Firestore selesai dimuatkan
+                _uiState.update { state ->
+                    if (state.members.isEmpty()) state
+                    else {
+                        val refreshed = state.members.map { m ->
+                            val baseName = userProfilesCache[m.uid]?.name ?: m.name
+                            val effectiveName = resolveEffectiveDisplayName(m.uid, baseName)
+                            val photo = userProfilesCache[m.uid]?.photoUrl ?: m.photoUrl
+                            m.copy(name = effectiveName, photoUrl = photo)
+                        }
+                        val updatedSelected = state.selectedMember?.let { sel ->
+                            refreshed.find { it.uid == sel.uid }
+                        } ?: refreshed.firstOrNull()
+                        state.copy(members = refreshed, selectedMember = updatedSelected)
+                    }
+                }
             } catch (_: Exception) {
             }
         }
@@ -162,13 +186,15 @@ class MapViewModel(
                                     val charging = parts[4].toBooleanStrictOrNull() ?: false
 
                                     val profile = userProfilesCache[encLoc.uid] ?: fetchAndCacheUser(encLoc.uid)
+                                    val accountName = profile?.name ?: "Ahli Keluarga"
+                                    val displayName = resolveEffectiveDisplayName(encLoc.uid, accountName)
                                     val cacheKey = String.format(Locale.US, "%.3f,%.3f", lat, lng)
                                     val cachedAddress = addressCache[cacheKey]
                                         ?: String.format(Locale.US, "%.4f, %.4f", lat, lng)
 
                                     DecryptedMemberLocation(
                                         uid = encLoc.uid,
-                                        name = profile?.name ?: "Ahli Keluarga",
+                                        name = displayName,
                                         photoUrl = profile?.photoUrl ?: "",
                                         latitude = lat,
                                         longitude = lng,
@@ -328,6 +354,46 @@ class MapViewModel(
         _uiState.update { it.copy(selectedMember = member) }
     }
 
+    /**
+     * Menetapkan nama panggilan peribadi pada telefon sendiri untuk mana-mana ahli (termasuk diri sendiri)
+     * dan terus menyegarkan senarai, peta, serta lencana secara masa nyata tanpa perlu tutup aplikasi.
+     */
+    fun setMemberNickname(targetUid: String, nickname: String) {
+        val cleanNickname = nickname.trim()
+        secureStorage.saveMemberNickname(targetUid, cleanNickname)
+        val updatedMap = secureStorage.getMemberNicknames()
+
+        val baseAccountName = userProfilesCache[targetUid]?.name
+            ?: (if (targetUid == currentUserId) auth.currentUser?.displayName else null)
+            ?: "Ahli Keluarga"
+        val effectiveName = if (cleanNickname.isNotEmpty()) cleanNickname else baseAccountName
+
+        _uiState.update { state ->
+            val updatedMembers = state.members.map { m ->
+                if (m.uid == targetUid) m.copy(name = effectiveName) else m
+            }
+            val updatedSelected = state.selectedMember?.let { sel ->
+                if (sel.uid == targetUid) sel.copy(name = effectiveName) else sel
+            }
+            val updatedHistoryOwner = if (state.historyOwnerName != null && state.selectedMember?.uid == targetUid) {
+                effectiveName
+            } else {
+                state.historyOwnerName
+            }
+            state.copy(
+                memberNicknames = updatedMap,
+                members = updatedMembers,
+                selectedMember = updatedSelected,
+                historyOwnerName = updatedHistoryOwner,
+                statusMessage = if (cleanNickname.isNotEmpty()) {
+                    "Nama panggilan ditukar ke '$cleanNickname'."
+                } else {
+                    "Nama panggilan dipulihkan ke '$baseAccountName'."
+                }
+            )
+        }
+    }
+
     fun load24HourRoute(member: DecryptedMemberLocation) {
         viewModelScope.launch {
             val points = locationRepository.get24HourHistory(member.uid)
@@ -373,15 +439,30 @@ class MapViewModel(
     }
 
     fun updateMyDisplayName(newName: String) {
+        val cleanName = newName.trim()
+        if (cleanName.isBlank()) return
+        val uid = currentUserId
+
+        // Kemas kini UI tempatan secara masa nyata serta-merta
+        userProfilesCache[uid] = (userProfilesCache[uid] ?: User(uid = uid)).copy(name = cleanName)
+        val effectiveName = resolveEffectiveDisplayName(uid, cleanName)
+        _uiState.update { state ->
+            val updatedMembers = state.members.map { m ->
+                if (m.uid == uid) m.copy(name = effectiveName) else m
+            }
+            val updatedSelected = state.selectedMember?.let { sel ->
+                if (sel.uid == uid) sel.copy(name = effectiveName) else sel
+            }
+            state.copy(members = updatedMembers, selectedMember = updatedSelected)
+        }
+
         viewModelScope.launch {
-            familyRepository.updateDisplayName(newName).fold(
+            familyRepository.updateDisplayName(cleanName).fold(
                 onSuccess = {
-                    val uid = currentUserId
-                    userProfilesCache[uid]?.let { userProfilesCache[uid] = it.copy(name = newName.trim()) }
-                    _uiState.update { it.copy(statusMessage = "Nama paparan berjaya ditukar ke '${newName.trim()}'.") }
+                    _uiState.update { it.copy(statusMessage = "Nama akaun berjaya ditukar ke '$cleanName'.") }
                 },
                 onFailure = { err ->
-                    _uiState.update { it.copy(statusMessage = "Gagal menukar nama: ${err.message}") }
+                    _uiState.update { it.copy(statusMessage = "Gagal menyimpan ke pelayan: ${err.message}") }
                 }
             )
         }

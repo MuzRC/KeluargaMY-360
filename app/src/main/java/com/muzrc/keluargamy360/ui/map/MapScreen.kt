@@ -161,6 +161,8 @@ fun MapScreen(
     var showSosDialog by remember { mutableStateOf(false) }
     var showInviteDialog by remember { mutableStateOf(false) }
     var mapActionMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
+    var nicknameTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
+    var nicknameInput by remember { mutableStateOf("") }
     var hideBatteryBanner by remember {
         mutableStateOf(secureStorage.isAutoStartConfigured())
     }
@@ -242,9 +244,9 @@ fun MapScreen(
         }
     }
 
-    // Hanya cetuskan animasi apabila koordinat (lat, lng) berubah—elak terbatal bila alamat dikemas kini
+    // Cetuskan kemas kini pin peta apabila koordinat atau nama paparan ahli berubah secara masa nyata
     val coordSignature = remember(uiState.members) {
-        uiState.members.map { "${it.uid}:${it.latitude}:${it.longitude}" }
+        uiState.members.map { "${it.uid}:${it.name}:${it.latitude}:${it.longitude}" }
     }
 
     DisposableEffect(coordSignature, mapLibreMap) {
@@ -467,6 +469,19 @@ fun MapScreen(
                         Text("Lihat Sejarah Laluan 24 Jam")
                     }
 
+                    FilledTonalButton(
+                        onClick = {
+                            mapActionMember = null
+                            nicknameTargetMember = member
+                            nicknameInput = uiState.memberNicknames[member.uid] ?: member.name
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Edit, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Ubah Nama Panggilan (Telefon Ini)")
+                    }
+
                     if (isNotMe) {
                         FilledTonalButton(
                             onClick = {
@@ -484,6 +499,46 @@ fun MapScreen(
             },
             confirmButton = {
                 TextButton(onClick = { mapActionMember = null }) { Text("Tutup") }
+            }
+        )
+    }
+
+    nicknameTargetMember?.let { target ->
+        AlertDialog(
+            onDismissRequest = { nicknameTargetMember = null },
+            title = { Text("Ubah Nama Panggilan") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Nama panggilan ini disimpan secara peribadi di telefon anda sahaja.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = nicknameInput,
+                        onValueChange = { nicknameInput = it },
+                        label = { Text("Nama Panggilan (cth: Ayah, Ibu, Adik)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.setMemberNickname(target.uid, nicknameInput)
+                    nicknameTargetMember = null
+                }) { Text("Simpan") }
+            },
+            dismissButton = {
+                Row {
+                    if (uiState.memberNicknames.containsKey(target.uid)) {
+                        TextButton(onClick = {
+                            viewModel.setMemberNickname(target.uid, "")
+                            nicknameTargetMember = null
+                        }) { Text("Set Semula") }
+                    }
+                    TextButton(onClick = { nicknameTargetMember = null }) { Text("Batal") }
+                }
             }
         )
     }
