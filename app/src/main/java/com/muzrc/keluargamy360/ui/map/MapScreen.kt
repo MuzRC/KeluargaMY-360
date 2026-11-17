@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
 import android.os.Build
@@ -37,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -140,6 +142,14 @@ fun MapScreen(
     val latestSelectedUid by rememberUpdatedState(uiState.selectedMember?.uid)
     val latestIsFollowing by rememberUpdatedState(isCameraFollowing)
 
+    val activityPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && uiState.isTrackingEnabled) {
+            LocationTrackingService.start(context)
+        }
+    }
+
     val bgPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { if (uiState.isTrackingEnabled) LocationTrackingService.start(context) }
@@ -165,8 +175,19 @@ fun MapScreen(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            perms.add(Manifest.permission.ACTIVITY_RECOGNITION)
+        }
         if (PermissionHelper.hasFineLocation(context)) {
             if (uiState.isTrackingEnabled) LocationTrackingService.start(context)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACTIVITY_RECOGNITION
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                activityPermLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+            }
         } else {
             fgPermLauncher.launch(perms.toTypedArray())
         }
