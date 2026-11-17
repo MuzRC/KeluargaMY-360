@@ -65,6 +65,8 @@ fun MainDashboardScreen(
     }
 
     var actionTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
+    var nicknameTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
+    var nicknameInput by remember { mutableStateOf("") }
     var showEditNameDialog by remember { mutableStateOf(false) }
     var showLeaveFamilyDialog by remember { mutableStateOf(false) }
     var showClearPrivateLogDialog by remember { mutableStateOf(false) }
@@ -383,6 +385,19 @@ fun MainDashboardScreen(
                     FilledTonalButton(
                         onClick = {
                             actionTargetMember = null
+                            nicknameTargetMember = member
+                            nicknameInput = uiState.memberNicknames[member.uid] ?: member.name
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Edit, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Ubah Nama Panggilan (Telefon Ini)")
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            actionTargetMember = null
                             mapViewModel.load24HourRoute(member)
                             selectedTab = 2
                         },
@@ -424,6 +439,46 @@ fun MainDashboardScreen(
             },
             confirmButton = {
                 TextButton(onClick = { actionTargetMember = null }) { Text("Tutup") }
+            }
+        )
+    }
+
+    nicknameTargetMember?.let { target ->
+        AlertDialog(
+            onDismissRequest = { nicknameTargetMember = null },
+            title = { Text("Ubah Nama Panggilan") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Nama panggilan ini hanya dipaparkan pada telefon anda (tidak mengubah profil asal ahli).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = nicknameInput,
+                        onValueChange = { nicknameInput = it },
+                        label = { Text("Nama Panggilan (cth: Ayah, Ibu, Adik)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    mapViewModel.setMemberNickname(target.uid, nicknameInput)
+                    nicknameTargetMember = null
+                }) { Text("Simpan") }
+            },
+            dismissButton = {
+                Row {
+                    if (uiState.memberNicknames.containsKey(target.uid)) {
+                        TextButton(onClick = {
+                            mapViewModel.setMemberNickname(target.uid, "")
+                            nicknameTargetMember = null
+                        }) { Text("Set Semula") }
+                    }
+                    TextButton(onClick = { nicknameTargetMember = null }) { Text("Batal") }
+                }
             }
         )
     }
@@ -996,14 +1051,63 @@ fun MainDashboardScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
-                                    Text("Nama Paparan Anda", style = MaterialTheme.typography.labelMedium)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Nama Paparan Akaun Anda", style = MaterialTheme.typography.labelMedium)
                                     Text(me?.name ?: "Ahli Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                 }
                                 TextButton(onClick = {
                                     newDisplayName = me?.name.orEmpty()
                                     showEditNameDialog = true
                                 }) { Text("Tukar Nama") }
+                            }
+                        }
+
+                        // Kad Nama Panggilan Peribadi Ahli Keluarga (Real-Time)
+                        if (uiState.members.isNotEmpty()) {
+                            Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        "Nama Panggilan Ahli (Telefon Ini)",
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        "Tetapkan gelaran peribadi seperti Ayah, Ibu atau Abang. Perubahan terus dikemas kini secara masa nyata.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    uiState.members.forEach { member ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = member.name,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                                if (uiState.memberNicknames.containsKey(member.uid)) {
+                                                    Text(
+                                                        text = "Nama panggilan peribadi aktif",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+                                            TextButton(onClick = {
+                                                nicknameTargetMember = member
+                                                nicknameInput = uiState.memberNicknames[member.uid] ?: member.name
+                                            }) {
+                                                Text("Ubah Gelaran")
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
