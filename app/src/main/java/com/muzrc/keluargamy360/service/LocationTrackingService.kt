@@ -30,6 +30,7 @@ import com.muzrc.keluargamy360.R
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.LocationRepository
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
+import com.muzrc.keluargamy360.util.AppDiagnosticLogHelper
 import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
@@ -133,6 +134,9 @@ class LocationTrackingService : Service(), SensorEventListener {
 
                 // 1. Tapis GPS Drift: isyarat mesti tepat (accuracy <= 35m) & jarak lebih besar daripada ralat GPS
                 val isAccurateFix = !loc.hasAccuracy() || loc.accuracy <= 35f
+                if (!isAccurateFix && loc.hasAccuracy()) {
+                    AppDiagnosticLogHelper.recordDiscardedGpsDrift(loc.accuracy)
+                }
                 val driftThreshold = if (loc.hasAccuracy()) {
                     max(MIN_DISPLACEMENT_METERS, loc.accuracy * 1.3f)
                 } else {
@@ -148,9 +152,19 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val hasRealGpsSpeed = isAccurateFix && gpsSpeedKmh >= 5f
                 val hasRealDisplacement = prevLoc != null && isAccurateFix && movedDistance >= driftThreshold
 
+                val wasStationaryBeforeMove = (now - lastMovementTimeMs) >= IDLE_THRESHOLD_MS
                 val isMovingNow = prevLoc == null || hasRealGpsSpeed || hasRealDisplacement
                 if (isMovingNow) {
                     lastMovementTimeMs = now
+                    if (prevLoc != null && isAccurateFix && movedDistance in 10f..5000f) {
+                        AppDiagnosticLogHelper.recordMovingSegment(
+                            context = this@LocationTrackingService,
+                            distanceMeters = movedDistance,
+                            speedKmh = if (hasRealGpsSpeed) gpsSpeedKmh else ((movedDistance / elapsedSec) * 3.6f),
+                            elapsedSeconds = elapsedSec,
+                            isNewTripStart = wasStationaryBeforeMove
+                        )
+                    }
                 }
 
                 // 2. Kira kelajuan hanya jika pergerakan sahih
@@ -235,7 +249,8 @@ class LocationTrackingService : Service(), SensorEventListener {
                                 longitude = uploadLng,
                                 speedKmh = speedKmh,
                                 batteryLevel = battery.level,
-                                isCharging = battery.isCharging
+                                isCharging = battery.isCharging,
+                                context = this@LocationTrackingService
                             )
                             if (liveSent) {
                                 AppBatteryLogHelper.recordFirestoreUpload()
@@ -245,6 +260,12 @@ class LocationTrackingService : Service(), SensorEventListener {
                                     AppBatteryLogHelper.recordFirestoreUpload()
                                 }
                             }
+                        } else {
+                            AppDiagnosticLogHelper.logSyncIssue(
+                                context = this@LocationTrackingService,
+                                operation = "Lokasi Langsung",
+                                reason = "Tiada sambungan internet"
+                            )
                         }
 
                         if (isMovingNow) {
@@ -307,6 +328,22 @@ class LocationTrackingService : Service(), SensorEventListener {
                             event.activityType in WAKEUP_ACTIVITIES
                         ) {
                             val now = System.currentTimeMillis()
+                            val actName = when (event.activityType) {
+                                DetectedActivity.IN_VEHICLE -> "Dalam Kenderaan"
+                                DetectedActivity.ON_BICYCLE -> "Berbasikal"
+                                DetectedActivity.WALKING -> "Berjalan Kaki"
+                                DetectedActivity.RUNNING -> "Berlari"
+                                else -> "Aktiviti Fizikal"
+                            }
+                            if (currentProfile == PowerProfile.STATIONARY_NORMAL ||
+                                currentProfile == PowerProfile.STATIONARY_LOW_BATTERY
+                            ) {
+                                AppDiagnosticLogHelper.logWakeupTrigger(
+                                    context = this@LocationTrackingService,
+                                    source = "ActivityRecognition: $actName",
+                                    profileBefore = currentProfile.name
+                                )
+                            }
                             lastMovementTimeMs = now
                             val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
                             evaluateProfileAndBattery(now, battery.level, battery.isCharging)
@@ -471,6 +508,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                 phoneBatteryLevel = batteryLevel,
                 isCharging = isCharging
             )
+            AppDiagnosticLogHelper.flushGpsDriftSummary(this)
             lastBatteryLogTimeMs = now
             lastLoggedBatteryLevel = batteryLevel
             lastLoggedChargingState = isCharging
@@ -655,6 +693,11 @@ class LocationTrackingService : Service(), SensorEventListener {
             if ((now - sustainedMotionStartMs) >= SUSTAINED_WAKEUP_MS) {
                 sustainedMotionStartMs = 0L
                 lastMotionImpulseMs = 0L
+                AppDiagnosticLogHelper.logWakeupTrigger(
+                    context = this,
+                    source = "Accelerometer Fallback (8s)",
+                    profileBefore = currentProfile.name
+                )
                 lastMovementTimeMs = now
                 val battery = BatteryHelper.getBatteryStatus(this)
                 evaluateProfileAndBattery(now, battery.level, battery.isCharging)
@@ -686,6 +729,11 @@ class LocationTrackingService : Service(), SensorEventListener {
                 profileName = currentProfile.name,
                 phoneBatteryLevel = battery.level,
                 isCharging = battery.isCharging
+            )
+            AppDiagnosticLogHelper.logServiceLifecycle(
+                context = this,
+                eventTitle = "Servis Penjejakan GPS Dimulakan",
+                extraDetail = "Profil awal: ${currentProfile.name} | Rangkaian: ${AppDiagnosticLogHelper.detectNetworkMode(this)}"
             )
         }
         startLocationUpdates()
@@ -746,9 +794,19 @@ class LocationTrackingService : Service(), SensorEventListener {
             .build()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        AppDiagnosticLogHelper.logServiceLifecycle(
+            context = this,
+            eventTitle = "Aplikasi Dileret Tutup (onTaskRemoved)",
+            extraDetail = "Servis latar belakang kekal bertahan (START_STICKY)"
+        )
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         monitorJob?.cancel()
         teardownActivityRecognition()
+        AppDiagnosticLogHelper.flushGpsDriftSummary(this)
         val battery = BatteryHelper.getBatteryStatus(this)
         AppBatteryLogHelper.logAppUsageCheckpoint(
             context = this,
@@ -756,6 +814,11 @@ class LocationTrackingService : Service(), SensorEventListener {
             profileName = currentProfile.name,
             phoneBatteryLevel = battery.level,
             isCharging = battery.isCharging
+        )
+        AppDiagnosticLogHelper.logServiceLifecycle(
+            context = this,
+            eventTitle = "Servis Penjejakan GPS Dihentikan (onDestroy)",
+            extraDetail = "Profil terakhir: ${currentProfile.name}"
         )
         updateSensorState(false)
         fusedLocationClient.removeLocationUpdates(locationCallback)

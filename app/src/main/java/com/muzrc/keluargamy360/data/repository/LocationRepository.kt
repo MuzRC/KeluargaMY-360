@@ -8,6 +8,7 @@ import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.model.EncryptedHistoryPoint
 import com.muzrc.keluargamy360.data.model.HistoryPoint
 import com.muzrc.keluargamy360.data.model.UserLocation
+import com.muzrc.keluargamy360.util.AppDiagnosticLogHelper
 import com.muzrc.keluargamy360.util.CryptoHelper
 import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import kotlinx.coroutines.tasks.await
@@ -23,7 +24,8 @@ class LocationRepository(
         longitude: Double,
         speedKmh: Float,
         batteryLevel: Int,
-        isCharging: Boolean
+        isCharging: Boolean,
+        context: Context? = null
     ): Boolean {
         val uid = auth.currentUser?.uid ?: return false
         val familyId = secureStorage.getFamilyId() ?: return false
@@ -57,7 +59,14 @@ class LocationRepository(
                     ).await()
             }
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (context != null) {
+                AppDiagnosticLogHelper.logSyncIssue(
+                    context = context,
+                    operation = "Lokasi Masa Nyata",
+                    reason = e.message ?: "Tamat tempoh sambungan (4s)"
+                )
+            }
             false
         }
     }
@@ -79,6 +88,11 @@ class LocationRepository(
 
         if (context != null && !OfflineRouteQueueHelper.isNetworkAvailable(context)) {
             OfflineRouteQueueHelper.enqueue(context, uid, familyId, latitude, longitude, recordedAtMs)
+            AppDiagnosticLogHelper.logSyncIssue(
+                context = context,
+                operation = "Simpan Titik Laluan",
+                reason = "Tiada liputan internet"
+            )
             return false
         }
 
@@ -109,9 +123,14 @@ class LocationRepository(
                 doc.reference.delete()
             }
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             if (context != null) {
                 OfflineRouteQueueHelper.enqueue(context, uid, familyId, latitude, longitude, recordedAtMs)
+                AppDiagnosticLogHelper.logSyncIssue(
+                    context = context,
+                    operation = "Simpan Titik Laluan",
+                    reason = e.message ?: "Muat naik tamat tempoh (4s)"
+                )
             }
             false
         }
@@ -154,8 +173,16 @@ class LocationRepository(
                 batch.commit().await()
             }
             OfflineRouteQueueHelper.removeUploadedTimestamps(context, uploadedTimestamps)
+            val remaining = OfflineRouteQueueHelper.peekAll(context)
+                .count { it.uid == uid && it.familyId == familyId }
+            AppDiagnosticLogHelper.logBatchSyncSuccess(context, uploadedTimestamps.size, remaining)
             uploadedTimestamps.size
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            AppDiagnosticLogHelper.logSyncIssue(
+                context = context,
+                operation = "Batch Sync Luar Talian",
+                reason = e.message ?: "Gagal komit batch Firestore"
+            )
             0
         }
     }

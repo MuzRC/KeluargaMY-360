@@ -9,6 +9,7 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +35,9 @@ import com.muzrc.keluargamy360.ui.places.PlacesScreen
 import com.muzrc.keluargamy360.util.ApkDownloadState
 import com.muzrc.keluargamy360.util.ApkUpdateInstaller
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
+import com.muzrc.keluargamy360.util.AppDiagnosticLogHelper
+import com.muzrc.keluargamy360.util.DiagnosticCategory
+import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
 import com.muzrc.keluargamy360.util.BatteryHelper
@@ -78,20 +82,30 @@ fun MainDashboardScreen(
     var availableUpdate by remember { mutableStateOf<AppUpdateResult.UpdateAvailable?>(null) }
     var showInstallPermDialog by remember { mutableStateOf(false) }
 
-    // Penapis tab Selamat: 0 = Log Keluarga, 1 = Zon Peribadi (.txt), 2 = Bateri App (.txt)
+    // Penapis tab Selamat: 0 = Keluarga, 1 = Zon (.txt), 2 = Bateri, 3 = Diagnostik & Perjalanan
     var safetyLogMode by remember { mutableIntStateOf(0) }
     var familyZoneOnlyFilter by remember { mutableStateOf(false) }
+    var diagCategoryFilter by remember { mutableStateOf<DiagnosticCategory?>(null) }
     var privateLogs by remember { mutableStateOf(PrivateZoneLogHelper.readLogs(context)) }
     var appBatteryLogs by remember { mutableStateOf(AppBatteryLogHelper.readLogs(context)) }
     var batterySinceCharge by remember { mutableStateOf(AppBatteryLogHelper.getUsageSinceLastCharge(context)) }
+    var diagnosticLogs by remember { mutableStateOf(AppDiagnosticLogHelper.readLogs(context, null)) }
+    var todayTripSummary by remember { mutableStateOf(AppDiagnosticLogHelper.getTodayTripSummary(context)) }
+    var offlineQueueCount by remember { mutableIntStateOf(OfflineRouteQueueHelper.peekAll(context).size) }
 
-    LaunchedEffect(selectedTab, safetyLogMode) {
+    LaunchedEffect(selectedTab, safetyLogMode, diagCategoryFilter) {
         if (selectedTab == 3) {
             when (safetyLogMode) {
                 1 -> privateLogs = PrivateZoneLogHelper.readLogs(context)
                 2 -> {
                     appBatteryLogs = AppBatteryLogHelper.readLogs(context)
                     batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
+                }
+                3 -> {
+                    AppDiagnosticLogHelper.flushGpsDriftSummary(context)
+                    diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, diagCategoryFilter)
+                    todayTripSummary = AppDiagnosticLogHelper.getTodayTripSummary(context)
+                    offlineQueueCount = OfflineRouteQueueHelper.peekAll(context).size
                 }
             }
         }
@@ -539,30 +553,39 @@ fun MainDashboardScreen(
     }
 
     if (showClearPrivateLogDialog) {
-        val isBatteryTab = safetyLogMode == 2
+        val clearTitle = when (safetyLogMode) {
+            2 -> "Padam Semua Log Bateri App?"
+            3 -> "Padam Semua Log Diagnostik?"
+            else -> "Padam Semua Log Peribadi?"
+        }
+        val clearDesc = when (safetyLogMode) {
+            2 -> "Fail log_bateri_app.txt dalam telefon anda akan dikosongkan sepenuhnya."
+            3 -> "Fail log_diagnostik_app.txt dalam telefon anda akan dikosongkan sepenuhnya."
+            else -> "Fail log_zon_peribadi.txt dalam telefon anda akan dikosongkan sepenuhnya."
+        }
         AlertDialog(
             onDismissRequest = { showClearPrivateLogDialog = false },
-            title = { Text(if (isBatteryTab) "Padam Semua Log Bateri App?" else "Padam Semua Log Peribadi?") },
-            text = {
-                Text(
-                    if (isBatteryTab) {
-                        "Fail log_bateri_app.txt dalam telefon anda akan dikosongkan sepenuhnya."
-                    } else {
-                        "Fail log_zon_peribadi.txt dalam telefon anda akan dikosongkan sepenuhnya."
-                    }
-                )
-            },
+            title = { Text(clearTitle) },
+            text = { Text(clearDesc) },
             confirmButton = {
                 Button(
                     onClick = {
-                        if (isBatteryTab) {
-                            AppBatteryLogHelper.clearLogs(context)
-                            appBatteryLogs = emptyList()
-                            Toast.makeText(context, "Log bateri app dikosongkan.", Toast.LENGTH_SHORT).show()
-                        } else {
-                            PrivateZoneLogHelper.clearLogs(context)
-                            privateLogs = emptyList()
-                            Toast.makeText(context, "Log zon peribadi dikosongkan.", Toast.LENGTH_SHORT).show()
+                        when (safetyLogMode) {
+                            2 -> {
+                                AppBatteryLogHelper.clearLogs(context)
+                                appBatteryLogs = emptyList()
+                                Toast.makeText(context, "Log bateri app dikosongkan.", Toast.LENGTH_SHORT).show()
+                            }
+                            3 -> {
+                                AppDiagnosticLogHelper.clearLogs(context)
+                                diagnosticLogs = emptyList()
+                                Toast.makeText(context, "Log diagnostik dikosongkan.", Toast.LENGTH_SHORT).show()
+                            }
+                            else -> {
+                                PrivateZoneLogHelper.clearLogs(context)
+                                privateLogs = emptyList()
+                                Toast.makeText(context, "Log zon peribadi dikosongkan.", Toast.LENGTH_SHORT).show()
+                            }
                         }
                         showClearPrivateLogDialog = false
                     },
@@ -689,10 +712,10 @@ fun MainDashboardScreen(
                             SegmentedButton(
                                 selected = safetyLogMode == 0,
                                 onClick = { safetyLogMode = 0 },
-                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
-                                icon = { Icon(Icons.Default.Groups, null, modifier = Modifier.size(16.dp)) }
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
+                                icon = {}
                             ) {
-                                Text("Keluarga", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text("Keluarga", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
                             }
                             SegmentedButton(
                                 selected = safetyLogMode == 1,
@@ -700,10 +723,10 @@ fun MainDashboardScreen(
                                     safetyLogMode = 1
                                     privateLogs = PrivateZoneLogHelper.readLogs(context)
                                 },
-                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
-                                icon = { Icon(Icons.Default.Lock, null, modifier = Modifier.size(16.dp)) }
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
+                                icon = {}
                             ) {
-                                Text("Zon (.txt)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text("Zon", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
                             }
                             SegmentedButton(
                                 selected = safetyLogMode == 2,
@@ -712,10 +735,24 @@ fun MainDashboardScreen(
                                     appBatteryLogs = AppBatteryLogHelper.readLogs(context)
                                     batterySinceCharge = AppBatteryLogHelper.getUsageSinceLastCharge(context)
                                 },
-                                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
-                                icon = { Icon(Icons.Default.BatteryChargingFull, null, modifier = Modifier.size(16.dp)) }
+                                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
+                                icon = {}
                             ) {
-                                Text("Bateri App", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                Text("Bateri", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                            }
+                            SegmentedButton(
+                                selected = safetyLogMode == 3,
+                                onClick = {
+                                    safetyLogMode = 3
+                                    AppDiagnosticLogHelper.flushGpsDriftSummary(context)
+                                    diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, diagCategoryFilter)
+                                    todayTripSummary = AppDiagnosticLogHelper.getTodayTripSummary(context)
+                                    offlineQueueCount = OfflineRouteQueueHelper.peekAll(context).size
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+                                icon = {}
+                            ) {
+                                Text("Sistem", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
                             }
                         }
 
@@ -1083,6 +1120,207 @@ fun MainDashboardScreen(
                                                             color = MaterialTheme.colorScheme.primary,
                                                             modifier = Modifier.padding(top = 4.dp)
                                                         )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            3 -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Log Diagnostik & Perjalanan (.txt)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            "Rangkaian: ${AppDiagnosticLogHelper.detectNetworkMode(context)} • Barisan: $offlineQueueCount titik",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Row {
+                                        IconButton(onClick = {
+                                            AppDiagnosticLogHelper.logTripCheckpointNow(context)
+                                            diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, diagCategoryFilter)
+                                            todayTripSummary = AppDiagnosticLogHelper.getTodayTripSummary(context)
+                                            Toast.makeText(context, "Ringkasan perjalanan direkod!", Toast.LENGTH_SHORT).show()
+                                        }) {
+                                            Icon(Icons.Default.AddCircleOutline, contentDescription = "Rekod Perjalanan", tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                        IconButton(onClick = {
+                                            AppDiagnosticLogHelper.flushGpsDriftSummary(context)
+                                            diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, diagCategoryFilter)
+                                            todayTripSummary = AppDiagnosticLogHelper.getTodayTripSummary(context)
+                                            offlineQueueCount = OfflineRouteQueueHelper.peekAll(context).size
+                                            Toast.makeText(context, "Log sistem disegar semula.", Toast.LENGTH_SHORT).show()
+                                        }) {
+                                            Icon(Icons.Default.Refresh, contentDescription = "Segar semula")
+                                        }
+                                        IconButton(onClick = {
+                                            AppDiagnosticLogHelper.exportToDownloads(context)
+                                                .onSuccess { fileName ->
+                                                    Toast.makeText(context, "Disimpan ke Downloads/$fileName", Toast.LENGTH_LONG).show()
+                                                }
+                                                .onFailure { err ->
+                                                    Toast.makeText(context, err.message ?: "Gagal eksport.", Toast.LENGTH_SHORT).show()
+                                                }
+                                        }) {
+                                            Icon(Icons.Default.Download, contentDescription = "Eksport .txt", tint = MaterialTheme.colorScheme.primary)
+                                        }
+                                        if (diagnosticLogs.isNotEmpty()) {
+                                            IconButton(onClick = { showClearPrivateLogDialog = true }) {
+                                                Icon(Icons.Default.DeleteOutline, contentDescription = "Padam Log", tint = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.height(6.dp))
+
+                                // Kad Ringkasan Perjalanan & Jarak Pemanduan Hari Ini
+                                Card(
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "Perjalanan & Jarak Hari Ini",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                            Text(
+                                                "${todayTripSummary.tripCount}x perjalanan • ${todayTripSummary.movingSeconds / 60L} min bergerak",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column {
+                                                Text("Jumlah Jarak", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                Text(
+                                                    String.format(Locale.US, "%.2f km", todayTripSummary.distanceKm),
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Column(horizontalAlignment = Alignment.End) {
+                                                Text("Kelajuan Maksimum", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                Text(
+                                                    "${todayTripSummary.maxSpeedKmh.roundToInt()} km/j",
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.height(6.dp))
+
+                                // Penapis kategori 4 log diagnostik
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    item {
+                                        FilterChip(
+                                            selected = diagCategoryFilter == null,
+                                            onClick = {
+                                                diagCategoryFilter = null
+                                                diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, null)
+                                            },
+                                            label = { Text("Semua", style = MaterialTheme.typography.labelSmall) }
+                                        )
+                                    }
+                                    items(DiagnosticCategory.entries) { cat ->
+                                        FilterChip(
+                                            selected = diagCategoryFilter == cat,
+                                            onClick = {
+                                                diagCategoryFilter = cat
+                                                diagnosticLogs = AppDiagnosticLogHelper.readLogs(context, cat)
+                                            },
+                                            label = { Text(cat.label, style = MaterialTheme.typography.labelSmall) }
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(6.dp))
+
+                                if (diagnosticLogs.isEmpty()) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "Belum ada rekod dalam kategori ini. Rekod dijana automatik semasa servis berjalan, muat naik gagal/pulih, atau pergerakan dikesan.",
+                                            textAlign = TextAlign.Center,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                } else {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+                                        items(diagnosticLogs) { item ->
+                                            val catIcon = when (item.category) {
+                                                DiagnosticCategory.SYNC -> Icons.Default.SyncProblem
+                                                DiagnosticCategory.SERVIS -> Icons.Default.HealthAndSafety
+                                                DiagnosticCategory.GPS -> Icons.Default.GpsFixed
+                                                DiagnosticCategory.TRIP -> Icons.Default.DirectionsCar
+                                            }
+                                            val catColor = when (item.category) {
+                                                DiagnosticCategory.SYNC -> Color(0xFFE65100)
+                                                DiagnosticCategory.SERVIS -> Color(0xFF1565C0)
+                                                DiagnosticCategory.GPS -> Color(0xFF6A1B9A)
+                                                DiagnosticCategory.TRIP -> Color(0xFF2E7D32)
+                                            }
+                                            Card(
+                                                shape = RoundedCornerShape(12.dp),
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                                    verticalAlignment = Alignment.Top
+                                                ) {
+                                                    Icon(catIcon, null, tint = catColor, modifier = Modifier.padding(top = 2.dp))
+                                                    Spacer(Modifier.width(10.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            "[${item.category.tag}] ${item.title}",
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                        if (item.detail.isNotBlank()) {
+                                                            Text(
+                                                                item.detail,
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                modifier = Modifier.padding(top = 2.dp)
+                                                            )
+                                                        }
+                                                        if (item.timestampText.isNotBlank()) {
+                                                            Text(
+                                                                item.timestampText,
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = catColor,
+                                                                modifier = Modifier.padding(top = 4.dp)
+                                                            )
+                                                        }
                                                     }
                                                 }
                                             }
