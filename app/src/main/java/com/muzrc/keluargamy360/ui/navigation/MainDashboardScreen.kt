@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.location.Location
 import android.net.Uri
-import android.os.SystemClock
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,6 +31,8 @@ import com.muzrc.keluargamy360.ui.map.MapScreen
 import com.muzrc.keluargamy360.ui.map.MapViewModel
 import com.muzrc.keluargamy360.ui.map.MemberCard
 import com.muzrc.keluargamy360.ui.places.PlacesScreen
+import com.muzrc.keluargamy360.util.ApkDownloadState
+import com.muzrc.keluargamy360.util.ApkUpdateInstaller
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
@@ -55,6 +56,7 @@ fun MainDashboardScreen(
     var selectedTab by remember { mutableIntStateOf(2) }
     val uiState by mapViewModel.uiState.collectAsState()
     val crashDetected by CrashAlertBus.crashDetected.collectAsState()
+    val apkDownloadState by ApkUpdateInstaller.downloadState.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -68,10 +70,10 @@ fun MainDashboardScreen(
     var showClearPrivateLogDialog by remember { mutableStateOf(false) }
     var newDisplayName by remember { mutableStateOf("") }
 
-    // Status semakan kemas kini manual (GitHub Releases)
+    // Status semakan kemas kini & pemasangan dalam aplikasi
     var isCheckingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateResult.UpdateAvailable?>(null) }
-    var lastDownloadClickElapsedMs by remember { mutableLongStateOf(0L) }
+    var showInstallPermDialog by remember { mutableStateOf(false) }
 
     // Penapis tab Selamat: 0 = Log Keluarga, 1 = Zon Peribadi (.txt), 2 = Bateri App (.txt)
     var safetyLogMode by remember { mutableIntStateOf(0) }
@@ -91,12 +93,44 @@ fun MainDashboardScreen(
         }
     }
 
-    // Dialog Kemas Kini Baharu Tersedia (Hanya muat turun 1 fail APK terkini)
+    // Dialog Kebenaran Pasang Aplikasi dari Sumber Ini (Android 8+)
+    if (showInstallPermDialog) {
+        AlertDialog(
+            onDismissRequest = { showInstallPermDialog = false },
+            icon = { Icon(Icons.Default.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp)) },
+            title = { Text("Benarkan Pemasangan Kemas Kini", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) },
+            text = {
+                Text(
+                    "Sila hidupkan kebenaran 'Benarkan daripada sumber ini' untuk KeluargaMY360 supaya kemas kini APK dapat dipasang terus tanpa melalui pelayar."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showInstallPermDialog = false
+                    ApkUpdateInstaller.openInstallPermissionSettings(context)
+                }) {
+                    Text("Buka Tetapan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showInstallPermDialog = false }) { Text("Batal") }
+            }
+        )
+    }
+
+    // Dialog Kemas Kini Baharu Tersedia (Muat Turun Dalam App + Bar Kemajuan + Pasang Terus)
     availableUpdate?.let { update ->
-        var isDownloadTriggered by remember(update) { mutableStateOf(false) }
+        val isDownloading = apkDownloadState is ApkDownloadState.Downloading
+        val readyState = apkDownloadState as? ApkDownloadState.ReadyToInstall
+        val failedState = apkDownloadState as? ApkDownloadState.Failed
 
         AlertDialog(
-            onDismissRequest = { availableUpdate = null },
+            onDismissRequest = {
+                if (!isDownloading) {
+                    ApkUpdateInstaller.resetState()
+                    availableUpdate = null
+                }
+            },
             icon = { Icon(Icons.Default.SystemUpdate, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp)) },
             title = {
                 Text(
@@ -122,37 +156,106 @@ fun MainDashboardScreen(
                         text = update.releaseNotes.take(400),
                         style = MaterialTheme.typography.bodySmall
                     )
+
+                    when (val dl = apkDownloadState) {
+                        is ApkDownloadState.Downloading -> {
+                            Spacer(Modifier.height(4.dp))
+                            if (dl.totalMb > 0f) {
+                                LinearProgressIndicator(
+                                    progress = { dl.progressPercent / 100f },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    text = String.format(
+                                        Locale.US,
+                                        "Memuat turun: %d%% (%.1f / %.1f MB)",
+                                        dl.progressPercent,
+                                        dl.downloadedMb,
+                                        dl.totalMb
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                Text(
+                                    text = "Menyediakan muat turun...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        is ApkDownloadState.ReadyToInstall -> {
+                            Text(
+                                text = "Muat turun selesai! Tekan 'Pasang Sekarang' jika tetingkap pemasangan tidak muncul.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF2E7D32),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        is ApkDownloadState.Failed -> {
+                            Text(
+                                text = dl.reason,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        else -> Unit
+                    }
                 }
             },
             confirmButton = {
-                Button(
-                    enabled = !isDownloadTriggered,
-                    onClick = {
-                        val nowElapsed = SystemClock.elapsedRealtime()
-                        if (isDownloadTriggered || (nowElapsed - lastDownloadClickElapsedMs) < 3000L) {
-                            return@Button
-                        }
-                        isDownloadTriggered = true
-                        lastDownloadClickElapsedMs = nowElapsed
-                        val url = update.downloadUrl
-                        availableUpdate = null
-                        try {
-                            val downloadIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                if (readyState != null) {
+                    Button(
+                        onClick = {
+                            if (!ApkUpdateInstaller.canInstallPackages(context)) {
+                                showInstallPermDialog = true
+                            } else {
+                                ApkUpdateInstaller.launchInstaller(context, readyState.apkFile)
                             }
-                            context.startActivity(downloadIntent)
-                        } catch (_: Exception) {
-                            Toast.makeText(context, "Gagal membuka pautan muat turun.", Toast.LENGTH_SHORT).show()
                         }
+                    ) {
+                        Icon(Icons.Default.InstallMobile, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Pasang Sekarang")
                     }
-                ) {
-                    Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Muat Turun 1 APK Terkini")
+                } else {
+                    Button(
+                        enabled = !isDownloading,
+                        onClick = {
+                            if (!ApkUpdateInstaller.canInstallPackages(context)) {
+                                showInstallPermDialog = true
+                            } else {
+                                ApkUpdateInstaller.startDownloadAndInstall(
+                                    context = context,
+                                    downloadUrl = update.downloadUrl,
+                                    apkFileName = update.apkFileName
+                                )
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            when {
+                                isDownloading -> "Memuat Turun..."
+                                failedState != null -> "Cuba Muat Turun Semula"
+                                else -> "Muat Turun & Pasang"
+                            }
+                        )
+                    }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { availableUpdate = null }) { Text("Nanti") }
+                TextButton(
+                    onClick = {
+                        ApkUpdateInstaller.resetState()
+                        availableUpdate = null
+                    }
+                ) {
+                    Text(if (isDownloading) "Sembunyi" else "Nanti")
+                }
             }
         )
     }
