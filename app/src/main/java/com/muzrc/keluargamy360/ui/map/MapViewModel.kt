@@ -396,7 +396,8 @@ class MapViewModel(
 
     fun load24HourRoute(member: DecryptedMemberLocation) {
         viewModelScope.launch {
-            val points = locationRepository.get24HourHistory(member.uid)
+            locationRepository.flushOfflineRouteQueue(appContext)
+            val points = locationRepository.get24HourHistory(member.uid, appContext)
             if (points.size < 2) {
                 _uiState.update {
                     it.copy(
