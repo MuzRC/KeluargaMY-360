@@ -5,19 +5,23 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.location.Location
+import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.KeluargaApp
@@ -72,10 +76,17 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var accelerometer: Sensor? = null
     private var isSensorActive = false
 
+    // Android Activity Recognition API (utama) + penapis sensor accelerometer (sandaran)
+    private var activityTransitionClient: ActivityRecognitionClient? = null
+    private var activityTransitionPendingIntent: PendingIntent? = null
+    private var activityTransitionReceiver: BroadcastReceiver? = null
+    private var isActivityRecognitionActive = false
+
     private var lastUploadedLocation: Location? = null
     private var lastHistoryLocation: Location? = null
     private var lastUploadTimeMs: Long = 0L
     private var lastMovementTimeMs: Long = System.currentTimeMillis()
+    private var lastEnteredStationaryMs: Long = 0L
     private var lastSpeedKmh: Float = 0f
     private var currentProfile: PowerProfile = PowerProfile.MOVING_HIGH_BATTERY
 
@@ -83,8 +94,9 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastLoggedBatteryLevel: Int = -1
     private var lastLoggedChargingState: Boolean? = null
 
-    private var motionShakeCount = 0
-    private var firstMotionShakeMs = 0L
+    // Penapis sandaran accelerometer: memerlukan gerakan berterusan >= 8 saat
+    private var sustainedMotionStartMs = 0L
+    private var lastMotionImpulseMs = 0L
 
     private var sentLowBatteryAlert = false
     private var lastSpeedAlertTimeMs: Long = 0L
@@ -95,10 +107,13 @@ class LocationTrackingService : Service(), SensorEventListener {
         secureStorage = SecureStorage(this)
         locationRepository = LocationRepository(secureStorage)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        activityTransitionClient = ActivityRecognition.getClient(this)
         AppBatteryLogHelper.initBaseline()
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
+        setupActivityRecognition()
 
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
@@ -262,6 +277,101 @@ class LocationTrackingService : Service(), SensorEventListener {
         startAppBatteryMonitorLoop()
     }
 
+    private fun hasActivityRecognitionPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    /**
+     * Mendaftarkan Android Activity Recognition API (perkakasan rendah tenaga Google)
+     * supaya mod tidur hanya bangun apabila sistem mengesahkan pengguna berjalan, berlari,
+     * berbasikal, atau memandu—mengabaikan pergerakan memegang telefon di tangan.
+     */
+    @SuppressLint("MissingPermission")
+    private fun setupActivityRecognition() {
+        if (isActivityRecognitionActive || !hasActivityRecognitionPermission()) return
+
+        try {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent == null || !ActivityTransitionResult.hasResult(intent)) return
+                    val result = ActivityTransitionResult.extractResult(intent) ?: return
+                    for (event in result.transitionEvents) {
+                        if (event.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER &&
+                            event.activityType in WAKEUP_ACTIVITIES
+                        ) {
+                            val now = System.currentTimeMillis()
+                            lastMovementTimeMs = now
+                            val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
+                            evaluateProfileAndBattery(now, battery.level, battery.isCharging)
+                            break
+                        }
+                    }
+                }
+            }
+            activityTransitionReceiver = receiver
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter(ACTION_ACTIVITY_TRANSITION),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+
+            val transitions = WAKEUP_ACTIVITIES.map { activityType ->
+                ActivityTransition.Builder()
+                    .setActivityType(activityType)
+                    .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_ENTER)
+                    .build()
+            }
+            val request = ActivityTransitionRequest(transitions)
+
+            val piIntent = Intent(ACTION_ACTIVITY_TRANSITION).setPackage(packageName)
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getBroadcast(this, 3602, piIntent, flags)
+            activityTransitionPendingIntent = pendingIntent
+
+            activityTransitionClient?.requestActivityTransitionUpdates(request, pendingIntent)
+                ?.addOnSuccessListener {
+                    isActivityRecognitionActive = true
+                    val battery = BatteryHelper.getBatteryStatus(this)
+                    evaluateProfileAndBattery(System.currentTimeMillis(), battery.level, battery.isCharging)
+                }
+                ?.addOnFailureListener {
+                    isActivityRecognitionActive = false
+                }
+        } catch (_: Exception) {
+            isActivityRecognitionActive = false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun teardownActivityRecognition() {
+        try {
+            activityTransitionPendingIntent?.let { pi ->
+                if (hasActivityRecognitionPermission()) {
+                    activityTransitionClient?.removeActivityTransitionUpdates(pi)
+                }
+                pi.cancel()
+            }
+            activityTransitionReceiver?.let { unregisterReceiver(it) }
+        } catch (_: Exception) {
+        } finally {
+            activityTransitionPendingIntent = null
+            activityTransitionReceiver = null
+            isActivityRecognitionActive = false
+        }
+    }
+
     /**
      * Pemasa latar belakang bebas (setiap 60 saat) supaya log bateri app, pertukaran mod tidur,
      * dan penghantaran semula laluan luar talian tetap berjalan walaupun telefon pegun.
@@ -274,6 +384,9 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val now = System.currentTimeMillis()
                 val battery = BatteryHelper.getBatteryStatus(this@LocationTrackingService)
                 withContext(Dispatchers.Main) {
+                    if (!isActivityRecognitionActive && hasActivityRecognitionPermission()) {
+                        setupActivityRecognition()
+                    }
                     evaluateProfileAndBattery(now, battery.level, battery.isCharging)
                 }
 
@@ -307,6 +420,11 @@ class LocationTrackingService : Service(), SensorEventListener {
             if (targetProfile != currentProfile) {
                 val oldProfile = currentProfile
                 currentProfile = targetProfile
+                if (targetProfile == PowerProfile.STATIONARY_NORMAL ||
+                    targetProfile == PowerProfile.STATIONARY_LOW_BATTERY
+                ) {
+                    lastEnteredStationaryMs = now
+                }
                 AppBatteryLogHelper.logAppUsageCheckpoint(
                     context = this,
                     reason = "Tukar Mod -> ${targetProfile.name}",
@@ -322,8 +440,10 @@ class LocationTrackingService : Service(), SensorEventListener {
                 evaluatePeriodicAppBatteryLog(now, batteryLevel, isCharging)
             }
 
+            // Jika Activity Recognition aktif, sensor accelerometer tidak perlu dihidupkan semasa tidur
             val shouldMonitorCrash = secureStorage.isCrashDetectionEnabled() && lastSpeedKmh >= 25f
-            updateSensorState(shouldMonitorCrash || isStationary)
+            val needFallbackWakeupSensor = isStationary && !isActivityRecognitionActive
+            updateSensorState(shouldMonitorCrash || needFallbackWakeupSensor)
         }
     }
 
@@ -472,7 +592,8 @@ class LocationTrackingService : Service(), SensorEventListener {
         } else if (!enable && isSensorActive) {
             sensorManager?.unregisterListener(this)
             isSensorActive = false
-            motionShakeCount = 0
+            sustainedMotionStartMs = 0L
+            lastMotionImpulseMs = 0L
         }
     }
 
@@ -492,21 +613,26 @@ class LocationTrackingService : Service(), SensorEventListener {
             }
         }
 
-        // 2. Bangun serta-merta dari mod tidur apabila pergerakan fizikal dikesan
+        // 2. Sandaran bangun (hanya digunakan jika kebenaran Activity Recognition tidak diberikan):
+        // Memerlukan tempoh bertenang 30s & gerakan berterusan sekurang-kurangnya 8 saat
         val isSleeping = currentProfile == PowerProfile.STATIONARY_NORMAL ||
                 currentProfile == PowerProfile.STATIONARY_LOW_BATTERY
-        if (isSleeping && abs(gForce - 1.0) >= 0.20) {
-            if (now - firstMotionShakeMs > 2500L) {
-                firstMotionShakeMs = now
-                motionShakeCount = 1
-            } else {
-                motionShakeCount++
-                if (motionShakeCount >= 3) {
-                    motionShakeCount = 0
-                    lastMovementTimeMs = now
-                    val battery = BatteryHelper.getBatteryStatus(this)
-                    evaluateProfileAndBattery(now, battery.level, battery.isCharging)
-                }
+        if (!isActivityRecognitionActive &&
+            isSleeping &&
+            (now - lastEnteredStationaryMs) >= STATIONARY_COOLDOWN_MS &&
+            abs(gForce - 1.0) >= 0.25
+        ) {
+            if (sustainedMotionStartMs == 0L || (now - lastMotionImpulseMs) > 2000L) {
+                sustainedMotionStartMs = now
+            }
+            lastMotionImpulseMs = now
+
+            if ((now - sustainedMotionStartMs) >= SUSTAINED_WAKEUP_MS) {
+                sustainedMotionStartMs = 0L
+                lastMotionImpulseMs = 0L
+                lastMovementTimeMs = now
+                val battery = BatteryHelper.getBatteryStatus(this)
+                evaluateProfileAndBattery(now, battery.level, battery.isCharging)
             }
         }
     }
@@ -515,6 +641,9 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
+        if (!isActivityRecognitionActive && hasActivityRecognitionPermission()) {
+            setupActivityRecognition()
+        }
         val battery = BatteryHelper.getBatteryStatus(this)
         val now = System.currentTimeMillis()
         currentProfile = resolveTargetProfile(
@@ -594,6 +723,7 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         monitorJob?.cancel()
+        teardownActivityRecognition()
         val battery = BatteryHelper.getBatteryStatus(this)
         AppBatteryLogHelper.logAppUsageCheckpoint(
             context = this,
@@ -612,11 +742,21 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
+        private const val ACTION_ACTIVITY_TRANSITION = "com.muzrc.keluargamy360.ACTION_ACTIVITY_TRANSITION"
         private const val IDLE_THRESHOLD_MS = 120_000L              // Masuk mod tidur selepas 2 minit pegun
+        private const val STATIONARY_COOLDOWN_MS = 30_000L          // Tempoh bertenang 30s selepas masuk mod tidur
+        private const val SUSTAINED_WAKEUP_MS = 8_000L              // Sandaran accelerometer: gerakan berterusan 8s
         private const val HEARTBEAT_NORMAL_MS = 300_000L            // Hantar status pegun setiap 5 minit
         private const val HEARTBEAT_LOW_BATTERY_MS = 600_000L       // Hantar status pegun setiap 10 minit (<20%)
         private const val APP_BATTERY_LOG_INTERVAL_MS = 1_800_000L  // Rekod statistik tenaga app setiap 30 minit
         private const val MIN_DISPLACEMENT_METERS = 25f             // Abaikan getaran GPS bawah 25 meter
+
+        private val WAKEUP_ACTIVITIES = listOf(
+            DetectedActivity.IN_VEHICLE,
+            DetectedActivity.ON_BICYCLE,
+            DetectedActivity.WALKING,
+            DetectedActivity.RUNNING
+        )
 
         fun start(context: Context) {
             val intent = Intent(context, LocationTrackingService::class.java)
