@@ -5,7 +5,9 @@ import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.location.Location
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.view.animation.LinearInterpolator
@@ -37,6 +39,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.firebase.auth.FirebaseAuth
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.service.LocationTrackingService
 import com.muzrc.keluargamy360.util.PermissionHelper
@@ -45,6 +48,8 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import java.util.Locale
+import kotlin.math.roundToInt
 
 private const val SATELLITE_STYLE_JSON = """
 {
@@ -98,6 +103,11 @@ fun MapScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val secureStorage = remember { SecureStorage(context) }
+
+    val currentUserId = remember { FirebaseAuth.getInstance().currentUser?.uid }
+    val myLocation = remember(uiState.members, currentUserId) {
+        uiState.members.find { it.uid == currentUserId }
+    }
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var mapStyleMode by remember { mutableIntStateOf(0) }
@@ -209,11 +219,9 @@ fun MapScreen(
                     val distanceMeters = distBuffer[0]
 
                     when {
-                        // Lompatan terlalu jauh (> 5 km) atau pegun (< 1.5 m): terus ke titik akhir
                         distanceMeters > 5000f || distanceMeters < 1.5f -> {
                             m.uid to MemberAnimPlan(m.latitude, m.longitude, m.latitude, m.longitude, 0L)
                         }
-                        // Kelajuan diketahui: padankan tempoh luncuran dengan kelajuan sebenar kenderaan
                         m.speedKmh > 3f -> {
                             val speedMps = (m.speedKmh / 3.6f).coerceAtLeast(1f)
                             val physicsDurationMs = ((distanceMeters / speedMps) * 1000f).toLong()
@@ -283,7 +291,6 @@ fun MapScreen(
 
                         MapMarkerHelper.updateMembers(map, interpolatedList)
 
-                        // Kamera turut meluncur serentak dengan ikon ahli yang dipilih
                         if (latestIsFollowing) {
                             followedLatLng?.let { pos ->
                                 map.moveCamera(CameraUpdateFactory.newLatLng(pos))
@@ -307,7 +314,6 @@ fun MapScreen(
         MapMarkerHelper.updateHistoryRoute(map, uiState.activeHistoryRoute)
     }
 
-    // Fokus kamera hanya apabila pengguna menukar ahli yang dipilih
     LaunchedEffect(uiState.selectedMember?.uid, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
         val target = uiState.selectedMember ?: return@LaunchedEffect
@@ -472,7 +478,6 @@ fun MapScreen(
                 val mapView = remember {
                     MapView(context).apply {
                         getMapAsync { map ->
-                            // Hentikan auto-ikut jika pengguna seret peta secara manual
                             map.addOnCameraMoveStartedListener { reason ->
                                 if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
                                     isCameraFollowing = false
@@ -561,19 +566,35 @@ fun MapScreen(
                     }
                 }
 
-                // Lencana ringkas ahli aktif semasa dalam mod peta skrin penuh
+                // Lencana ringkas ahli aktif + butang navigasi terus semasa dalam mod peta skrin penuh
                 if (isFullscreenMap) {
                     uiState.selectedMember?.let { sel ->
+                        val distText = remember(myLocation?.latitude, myLocation?.longitude, sel.latitude, sel.longitude) {
+                            if (myLocation == null || myLocation.uid == sel.uid) {
+                                null
+                            } else {
+                                val res = FloatArray(1)
+                                Location.distanceBetween(
+                                    myLocation.latitude,
+                                    myLocation.longitude,
+                                    sel.latitude,
+                                    sel.longitude,
+                                    res
+                                )
+                                if (res[0] < 1000f) "${res[0].roundToInt()} m" else String.format(Locale.US, "%.1f km", res[0] / 1000f)
+                            }
+                        }
+
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                             shadowElevation = 6.dp,
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
                                 .padding(start = 14.dp, bottom = 14.dp, end = 76.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -584,8 +605,12 @@ fun MapScreen(
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Column(modifier = Modifier.weight(1f, fill = false)) {
+                                    val titleLine = buildString {
+                                        append("${sel.name} • ${sel.batteryLevel}%")
+                                        if (distText != null) append(" • $distText")
+                                    }
                                     Text(
-                                        text = "${sel.name} • ${sel.batteryLevel}%",
+                                        text = titleLine,
                                         style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1
@@ -596,6 +621,28 @@ fun MapScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1
                                     )
+                                }
+                                if (myLocation?.uid != sel.uid) {
+                                    IconButton(
+                                        onClick = {
+                                            val uri = Uri.parse(
+                                                "geo:${sel.latitude},${sel.longitude}?q=${sel.latitude},${sel.longitude}(${Uri.encode(sel.name)})"
+                                            )
+                                            try {
+                                                context.startActivity(
+                                                    Intent.createChooser(Intent(Intent.ACTION_VIEW, uri), "Pandu ke ${sel.name}")
+                                                )
+                                            } catch (_: Exception) {
+                                                Toast.makeText(context, "Tiada aplikasi navigasi dijumpai.", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Navigation,
+                                            contentDescription = "Pandu ke ${sel.name}",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -660,6 +707,7 @@ fun MapScreen(
                                     MemberCard(
                                         member = member,
                                         isSelected = member.uid == uiState.selectedMember?.uid,
+                                        myLocation = myLocation,
                                         onClick = {
                                             isCameraFollowing = true
                                             viewModel.selectMember(member)

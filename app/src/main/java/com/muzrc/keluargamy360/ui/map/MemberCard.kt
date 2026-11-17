@@ -1,6 +1,7 @@
 package com.muzrc.keluargamy360.ui.map
 
 import android.content.Intent
+import android.location.Location
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -31,6 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.muzrc.keluargamy360.data.model.DecryptedMemberLocation
+import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val OFFLINE_THRESHOLD_MS = 15L * 60L * 1000L // 15 minit
@@ -39,11 +42,35 @@ private const val OFFLINE_THRESHOLD_MS = 15L * 60L * 1000L // 15 minit
 fun MemberCard(
     member: DecryptedMemberLocation,
     isSelected: Boolean,
+    myLocation: DecryptedMemberLocation? = null,
     onClick: () -> Unit
 ) {
     val context = LocalContext.current
     val now = System.currentTimeMillis()
     val isOffline = member.updatedAt > 0L && (now - member.updatedAt) >= OFFLINE_THRESHOLD_MS
+    val isMe = myLocation != null && myLocation.uid == member.uid
+
+    val distanceLabel = remember(
+        myLocation?.latitude,
+        myLocation?.longitude,
+        member.latitude,
+        member.longitude,
+        isMe
+    ) {
+        if (myLocation == null || isMe) {
+            null
+        } else {
+            val result = FloatArray(1)
+            Location.distanceBetween(
+                myLocation.latitude,
+                myLocation.longitude,
+                member.latitude,
+                member.longitude,
+                result
+            )
+            formatDistanceFromMe(result[0])
+        }
+    }
 
     val borderColor = when {
         isSelected -> MaterialTheme.colorScheme.primary
@@ -184,8 +211,12 @@ fun MemberCard(
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
+                        val offlineText = buildString {
+                            append("Luar talian • ${formatOfflineAge(member.updatedAt)}")
+                            if (distanceLabel != null) append(" • $distanceLabel")
+                        }
                         Text(
-                            text = "Luar talian • ${formatOfflineAge(member.updatedAt)}",
+                            text = offlineText,
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFFF9800),
                             fontWeight = FontWeight.SemiBold,
@@ -194,10 +225,25 @@ fun MemberCard(
                         )
                     }
                 } else {
+                    val statusSubtext = buildString {
+                        if (isMe) {
+                            append("Anda • ")
+                        } else if (distanceLabel != null) {
+                            append("$distanceLabel • ")
+                        }
+                        append(formatRelativeTime(member.updatedAt))
+                    }
                     Text(
-                        text = formatRelativeTime(member.updatedAt),
+                        text = statusSubtext,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (distanceLabel != null && !isMe) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontWeight = if (distanceLabel != null && !isMe) FontWeight.Medium else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
@@ -244,6 +290,14 @@ fun MemberCard(
                 )
             }
         }
+    }
+}
+
+private fun formatDistanceFromMe(meters: Float): String {
+    return when {
+        meters < 50f -> "Berhampiran anda"
+        meters < 1000f -> "${meters.roundToInt()} m dari anda"
+        else -> String.format(Locale.US, "%.1f km dari anda", meters / 1000f)
     }
 }
 

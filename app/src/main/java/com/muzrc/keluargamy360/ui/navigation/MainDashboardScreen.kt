@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.location.Location
 import android.net.Uri
 import android.os.SystemClock
 import android.widget.Toast
@@ -56,6 +57,10 @@ fun MainDashboardScreen(
     val crashDetected by CrashAlertBus.crashDetected.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+
+    val myLocation = remember(uiState.members, mapViewModel.currentUserId) {
+        uiState.members.find { it.uid == mapViewModel.currentUserId }
+    }
 
     var actionTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var showEditNameDialog by remember { mutableStateOf(false) }
@@ -211,17 +216,66 @@ fun MainDashboardScreen(
         )
     }
 
-    // Dialog Tindakan Pantas untuk Ahli (Sejarah Laluan 24 Jam, Deringkan Telefon, Buang Ahli)
+    // Dialog Tindakan Pantas untuk Ahli (Navigasi Waze/Maps, Laluan 24j, Deringkan, Buang Ahli)
     actionTargetMember?.let { member ->
         val isOwner = uiState.familyGroup?.ownerId == mapViewModel.currentUserId
         val isNotMe = member.uid != mapViewModel.currentUserId
+        val distanceText = remember(myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude, isNotMe) {
+            if (!isNotMe || myLocation == null) {
+                null
+            } else {
+                val res = FloatArray(1)
+                Location.distanceBetween(
+                    myLocation.latitude,
+                    myLocation.longitude,
+                    member.latitude,
+                    member.longitude,
+                    res
+                )
+                if (res[0] < 1000f) "${res[0].roundToInt()} meter dari anda"
+                else String.format(Locale.US, "%.1f km dari anda", res[0] / 1000f)
+            }
+        }
 
         AlertDialog(
             onDismissRequest = { actionTargetMember = null },
-            title = { Text(member.name, fontWeight = FontWeight.Bold) },
+            title = {
+                Column {
+                    Text(member.name, fontWeight = FontWeight.Bold)
+                    if (distanceText != null) {
+                        Text(
+                            text = distanceText,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(member.addressText, style = MaterialTheme.typography.bodySmall)
+
+                    if (isNotMe) {
+                        Button(
+                            onClick = {
+                                actionTargetMember = null
+                                val uri = Uri.parse(
+                                    "geo:${member.latitude},${member.longitude}?q=${member.latitude},${member.longitude}(${Uri.encode(member.name)})"
+                                )
+                                val navIntent = Intent(Intent.ACTION_VIEW, uri)
+                                try {
+                                    context.startActivity(Intent.createChooser(navIntent, "Pandu ke ${member.name}"))
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "Tiada aplikasi peta/navigasi dijumpai.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Navigation, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Pandu ke Lokasi (Waze / Maps)", fontWeight = FontWeight.Bold)
+                        }
+                    }
 
                     FilledTonalButton(
                         onClick = {
@@ -401,7 +455,7 @@ fun MainDashboardScreen(
                                     Column {
                                         Text("Senarai Ahli Keluarga", fontWeight = FontWeight.Bold)
                                         Text(
-                                            "Tekan kad ahli untuk laluan 24j & deringan",
+                                            "Tekan kad ahli untuk navigasi, laluan 24j & deringan",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -419,6 +473,7 @@ fun MainDashboardScreen(
                                 MemberCard(
                                     member = member,
                                     isSelected = member.uid == uiState.selectedMember?.uid,
+                                    myLocation = myLocation,
                                     onClick = { actionTargetMember = member }
                                 )
                             }
@@ -464,7 +519,6 @@ fun MainDashboardScreen(
 
                         Spacer(Modifier.height(12.dp))
 
-                        // Penukar 3 sumber log tanpa bercampur
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             SegmentedButton(
                                 selected = safetyLogMode == 0,
@@ -503,7 +557,6 @@ fun MainDashboardScreen(
 
                         when (safetyLogMode) {
                             0 -> {
-                                // 1. LOG AKTIVITI KELUARGA (FIREBASE)
                                 Text("Log Aktiviti Keluarga", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(8.dp))
 
@@ -546,7 +599,6 @@ fun MainDashboardScreen(
                                 }
                             }
                             1 -> {
-                                // 2. LOG ZON PERIBADI TEMPATAN (.TXT DALAM TELEFON)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -634,7 +686,6 @@ fun MainDashboardScreen(
                                 }
                             }
                             2 -> {
-                                // 3. LOG PENGGUNAAN TENAGA KHUSUS PROSES KELUARGAMY360 (.TXT)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -692,7 +743,6 @@ fun MainDashboardScreen(
 
                                 Spacer(Modifier.height(6.dp))
 
-                                // Kad Ringkasan Jumlah Bateri Digunakan Sejak Kali Terakhir Dicas
                                 val sinceFmt = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale("ms", "MY")) }
                                 Card(
                                     shape = RoundedCornerShape(14.dp),
@@ -826,7 +876,6 @@ fun MainDashboardScreen(
                     }
                 }
                 4 -> {
-                    // Tab Kanan 2: Tetapan Profil, Had Keselamatan, Semak Kemas Kini & Kumpulan
                     val code = uiState.familyGroup?.inviteCode ?: "-"
                     val me = uiState.members.find { it.uid == mapViewModel.currentUserId }
                     Column(
@@ -838,7 +887,6 @@ fun MainDashboardScreen(
                     ) {
                         Text("Tetapan & Keselamatan", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
-                        // Kad Profil & Nama Paparan
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier.padding(14.dp).fillMaxWidth(),
@@ -856,7 +904,6 @@ fun MainDashboardScreen(
                             }
                         }
 
-                        // Kad Kod Jemputan
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier.padding(14.dp).fillMaxWidth(),
@@ -875,7 +922,6 @@ fun MainDashboardScreen(
                             }
                         }
 
-                        // Kad Kawalan Keselamatan Pintar
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("Keselamatan Pintar", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
@@ -911,7 +957,6 @@ fun MainDashboardScreen(
                             }
                         }
 
-                        // Kad Versi Aplikasi & Semak Kemas Kini Manual (GitHub Releases)
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier.padding(14.dp).fillMaxWidth(),
