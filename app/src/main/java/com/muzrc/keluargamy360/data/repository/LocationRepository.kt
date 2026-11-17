@@ -3,7 +3,6 @@ package com.muzrc.keluargamy360.data.repository
 import android.content.Context
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.model.EncryptedHistoryPoint
@@ -97,11 +96,10 @@ class LocationRepository(
                     .await()
             }
 
-            // Padam rekod sejarah lebih lama daripada 24 jam secara automatik
+            // Padam rekod sejarah lebih lama daripada 24 jam menggunakan indeks tunggal automatik
             val cutoff = System.currentTimeMillis() - 86_400_000L
             val oldDocs = db.collection("families").document(familyId)
                 .collection("history")
-                .whereEqualTo("uid", uid)
                 .whereLessThan("timestamp", cutoff)
                 .limit(20)
                 .get()
@@ -161,22 +159,30 @@ class LocationRepository(
         }
     }
 
-    suspend fun get24HourHistory(targetUid: String): List<HistoryPoint> {
+    /**
+     * Mengambil sejarah laluan 24 jam tanpa bergantung pada Firestore Composite Index
+     * (menggunakan indeks tunggal timestamp + tapisan uid & susunan masa di aplikasi),
+     * serta menggabungkan titik luar talian tempatan yang belum sempat dimuat naik.
+     */
+    suspend fun get24HourHistory(targetUid: String, context: Context? = null): List<HistoryPoint> {
         val familyId = secureStorage.getFamilyId() ?: return emptyList()
         val masterKey = secureStorage.getFamilyMasterKey() ?: return emptyList()
         val cutoff = System.currentTimeMillis() - 86_400_000L
 
-        return try {
-            val snap = db.collection("families").document(familyId)
-                .collection("history")
-                .whereEqualTo("uid", targetUid)
-                .whereGreaterThan("timestamp", cutoff)
-                .orderBy("timestamp", Query.Direction.ASCENDING)
-                .get()
-                .await()
+        val remotePoints = try {
+            val snap = withTimeout(6000L) {
+                db.collection("families").document(familyId)
+                    .collection("history")
+                    .whereGreaterThan("timestamp", cutoff)
+                    .get()
+                    .await()
+            }
 
             snap.documents.mapNotNull { doc ->
                 val enc = doc.toObject(EncryptedHistoryPoint::class.java) ?: return@mapNotNull null
+                val docUid = enc.uid.ifBlank { doc.getString("uid").orEmpty() }
+                if (docUid != targetUid) return@mapNotNull null
+
                 val plain = CryptoHelper.decrypt(enc.encryptedCoords, enc.iv, masterKey) ?: return@mapNotNull null
                 val parts = plain.split("|")
                 val lat = parts.getOrNull(0)?.toDoubleOrNull() ?: return@mapNotNull null
@@ -186,6 +192,18 @@ class LocationRepository(
         } catch (_: Exception) {
             emptyList()
         }
+
+        val localQueuedPoints = if (context != null) {
+            OfflineRouteQueueHelper.peekAll(context)
+                .filter { it.uid == targetUid && it.familyId == familyId && it.timestamp > cutoff }
+                .map { HistoryPoint(it.latitude, it.longitude, it.timestamp) }
+        } else {
+            emptyList()
+        }
+
+        return (remotePoints + localQueuedPoints)
+            .distinctBy { it.timestamp }
+            .sortedBy { it.timestamp }
     }
 
     suspend fun postFamilyAlert(
