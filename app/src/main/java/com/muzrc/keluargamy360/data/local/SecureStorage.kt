@@ -69,6 +69,38 @@ class SecureStorage(context: Context) {
 
     fun isCrashDetectionEnabled(): Boolean = prefs.getBoolean(KEY_CRASH_DETECTION, true)
 
+    fun saveMemberNickname(uid: String, nickname: String) {
+        val clean = nickname.trim()
+        val map = getMemberNicknames().toMutableMap()
+        if (clean.isEmpty()) {
+            map.remove(uid)
+        } else {
+            map[uid] = clean
+        }
+        val obj = JSONObject()
+        map.forEach { (k, v) -> obj.put(k, v) }
+        prefs.edit().putString(KEY_MEMBER_NICKNAMES, obj.toString()).apply()
+    }
+
+    fun getMemberNicknames(): Map<String, String> {
+        val raw = prefs.getString(KEY_MEMBER_NICKNAMES, null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(raw)
+            val result = mutableMapOf<String, String>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val v = obj.optString(k, "").trim()
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    result[k] = v
+                }
+            }
+            result
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
     fun savePrivatePlaces(places: List<SafePlace>) {
         val array = JSONArray()
         places.forEach { p ->
@@ -109,10 +141,14 @@ class SecureStorage(context: Context) {
     fun clearSession() {
         val savedPrivate = prefs.getString(KEY_PRIVATE_PLACES, null)
         val savedAutoStart = prefs.getBoolean(KEY_AUTO_START_CONFIGURED, false)
+        val savedNicknames = prefs.getString(KEY_MEMBER_NICKNAMES, null)
         prefs.edit().clear().apply()
         prefs.edit().putBoolean(KEY_AUTO_START_CONFIGURED, savedAutoStart).apply()
         if (savedPrivate != null) {
             prefs.edit().putString(KEY_PRIVATE_PLACES, savedPrivate).apply()
+        }
+        if (savedNicknames != null) {
+            prefs.edit().putString(KEY_MEMBER_NICKNAMES, savedNicknames).apply()
         }
     }
 
@@ -126,5 +162,6 @@ class SecureStorage(context: Context) {
         private const val KEY_SPEED_LIMIT_KMH = "speed_limit_kmh"
         private const val KEY_CRASH_DETECTION = "crash_detection_enabled"
         private const val KEY_PRIVATE_PLACES = "private_safe_places"
+        private const val KEY_MEMBER_NICKNAMES = "member_custom_nicknames"
     }
 }
