@@ -253,11 +253,11 @@ fun MapScreen(
                     }
                 }
             } else {
-                val animator = ValueAnimator.ofLong(0L, maxDuration).apply {
+                val animator = ValueAnimator.ofFloat(0f, maxDuration.toFloat()).apply {
                     duration = maxDuration
                     interpolator = LinearInterpolator()
                     addUpdateListener { anim ->
-                        val elapsed = anim.animatedValue as Long
+                        val elapsed = (anim.animatedValue as Float).toLong()
                         val currentList = latestMembers
                         var followedLatLng: LatLng? = null
 
