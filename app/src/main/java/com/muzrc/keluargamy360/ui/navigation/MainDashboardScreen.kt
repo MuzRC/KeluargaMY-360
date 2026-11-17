@@ -40,6 +40,7 @@ import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
+import com.muzrc.keluargamy360.util.RoadDistanceHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -321,26 +322,32 @@ fun MainDashboardScreen(
         )
     }
 
-    // Dialog Tindakan Pantas untuk Ahli (Navigasi Waze/Maps, Laluan 24j, Deringkan, Buang Ahli)
+    // Dialog Tindakan Pantas untuk Ahli (Navigasi Waze/Maps, Laluan 7 Hari, Deringkan, Buang Ahli)
     actionTargetMember?.let { member ->
         val isOwner = uiState.familyGroup?.ownerId == mapViewModel.currentUserId
         val isNotMe = member.uid != mapViewModel.currentUserId
-        val distanceText = remember(myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude, isNotMe) {
-            if (!isNotMe || myLocation == null) {
-                null
-            } else {
-                val res = FloatArray(1)
-                Location.distanceBetween(
+        var roadEst by remember(member.uid, myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude) {
+            mutableStateOf(
+                if (!isNotMe || myLocation == null) null
+                else RoadDistanceHelper.computeStraightLine(
                     myLocation.latitude,
                     myLocation.longitude,
                     member.latitude,
-                    member.longitude,
-                    res
+                    member.longitude
                 )
-                if (res[0] < 1000f) "${res[0].roundToInt()} meter dari anda"
-                else String.format(Locale.US, "%.1f km dari anda", res[0] / 1000f)
+            )
+        }
+        LaunchedEffect(member.uid, myLocation?.latitude, myLocation?.longitude, member.latitude, member.longitude) {
+            if (isNotMe && myLocation != null) {
+                roadEst = RoadDistanceHelper.getRoadEstimate(
+                    myLocation.latitude,
+                    myLocation.longitude,
+                    member.latitude,
+                    member.longitude
+                )
             }
         }
+        val distanceText = roadEst?.formatCompact()
 
         AlertDialog(
             onDismissRequest = { actionTargetMember = null },
@@ -398,14 +405,14 @@ fun MainDashboardScreen(
                     FilledTonalButton(
                         onClick = {
                             actionTargetMember = null
-                            mapViewModel.load24HourRoute(member)
+                            mapViewModel.load24HourRoute(member, 0)
                             selectedTab = 2
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.Timeline, null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Lihat Sejarah Laluan 24 Jam")
+                        Text("Lihat Sejarah Laluan (7 Hari)")
                     }
 
                     if (isNotMe) {
