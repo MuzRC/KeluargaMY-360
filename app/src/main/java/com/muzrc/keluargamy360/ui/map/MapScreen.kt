@@ -52,6 +52,11 @@ import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.BackgroundLayer
+import org.maplibre.android.style.layers.FillLayer
+import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.layers.SymbolLayer
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -82,9 +87,46 @@ private const val SATELLITE_STYLE_JSON = """
 
 private fun buildMapStyle(mode: Int): Style.Builder {
     return when (mode) {
-        1 -> Style.Builder().fromUri("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json")
         2 -> Style.Builder().fromJson(SATELLITE_STYLE_JSON)
         else -> Style.Builder().fromUri("https://tiles.openfreemap.org/styles/liberty")
+    }
+}
+
+private fun applyStyleTheme(style: Style, mode: Int) {
+    if (mode != 1) return
+    for (layer in style.layers) {
+        val id = layer.id.lowercase(Locale.US)
+        when (layer) {
+            is BackgroundLayer -> {
+                layer.setProperties(PropertyFactory.backgroundColor("#1E293B"))
+            }
+            is FillLayer -> {
+                val fillHex = when {
+                    "water" in id -> "#0F172A"
+                    "park" in id || "forest" in id || "wood" in id || "grass" in id || "landcover" in id -> "#18332B"
+                    "building" in id -> "#334155"
+                    else -> "#243247"
+                }
+                layer.setProperties(PropertyFactory.fillColor(fillHex))
+            }
+            is LineLayer -> {
+                val lineHex = when {
+                    "water" in id -> "#1E3A5F"
+                    "motorway" in id || "trunk" in id || "primary" in id -> "#FBBF24"
+                    "secondary" in id || "tertiary" in id -> "#CBD5E1"
+                    "boundary" in id || "admin" in id -> "#64748B"
+                    else -> "#94A3B8"
+                }
+                layer.setProperties(PropertyFactory.lineColor(lineHex))
+            }
+            is SymbolLayer -> {
+                layer.setProperties(
+                    PropertyFactory.textColor("#F8FAFC"),
+                    PropertyFactory.textHaloColor("#0F172A"),
+                    PropertyFactory.textHaloWidth(1.5f)
+                )
+            }
+        }
     }
 }
 
@@ -631,6 +673,7 @@ fun MapScreen(
                                 false
                             }
                             map.setStyle(buildMapStyle(mapStyleMode)) { style ->
+                                applyStyleTheme(style, mapStyleMode)
                                 MapMarkerHelper.setupLayers(style)
                                 mapLibreMap = map
                                 MapMarkerHelper.updateMembers(map, uiState.members)
@@ -686,6 +729,7 @@ fun MapScreen(
                             Toast.makeText(context, modeLabel, Toast.LENGTH_SHORT).show()
 
                             mapLibreMap?.setStyle(buildMapStyle(mapStyleMode)) { style ->
+                                applyStyleTheme(style, mapStyleMode)
                                 MapMarkerHelper.setupLayers(style)
                                 mapLibreMap?.let {
                                     MapMarkerHelper.updateMembers(it, uiState.members)
