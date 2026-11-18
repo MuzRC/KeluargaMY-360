@@ -207,6 +207,10 @@ fun MapScreen(
     var mapActionMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var nicknameTargetMember by remember { mutableStateOf<DecryptedMemberLocation?>(null) }
     var nicknameInput by remember { mutableStateOf("") }
+    var longPressZoneCoords by remember { mutableStateOf<LatLng?>(null) }
+    var longPressZoneName by remember { mutableStateOf("") }
+    var longPressZoneRadius by remember { mutableFloatStateOf(150f) }
+    var longPressZonePrivate by remember { mutableStateOf(false) }
     var hideBatteryBanner by remember {
         mutableStateOf(secureStorage.isAutoStartConfigured())
     }
@@ -638,6 +642,95 @@ fun MapScreen(
         )
     }
 
+    // Dialog Cipta Zon Selamat apabila pengguna tekan lama (Long-Press) di atas peta
+    longPressZoneCoords?.let { tappedLatLng ->
+        AlertDialog(
+            onDismissRequest = { longPressZoneCoords = null },
+            icon = { Icon(Icons.Default.AddLocationAlt, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Cipta Zon Selamat di Titik Ini") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = String.format(
+                            Locale.US,
+                            "Koordinat dipilih: %.5f, %.5f",
+                            tappedLatLng.latitude,
+                            tappedLatLng.longitude
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    OutlinedTextField(
+                        value = longPressZoneName,
+                        onValueChange = { longPressZoneName = it },
+                        label = { Text("Nama Zon (cth: Sekolah, Rumah Kampung)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = !longPressZonePrivate,
+                            onClick = { longPressZonePrivate = false },
+                            label = { Text("Keluarga") },
+                            leadingIcon = { Icon(Icons.Default.Group, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = longPressZonePrivate,
+                            onClick = { longPressZonePrivate = true },
+                            label = { Text("Peribadi") },
+                            leadingIcon = { Icon(Icons.Default.Lock, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Text(
+                        text = if (longPressZonePrivate) {
+                            "Disimpan di telefon ini sahaja (rahsia)."
+                        } else {
+                            "Dikongsi dengan semua ahli keluarga."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Column {
+                        Text(
+                            text = "Jejari Zon: ${longPressZoneRadius.roundToInt()} meter",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Slider(
+                            value = longPressZoneRadius,
+                            onValueChange = { longPressZoneRadius = it },
+                            valueRange = 100f..500f,
+                            steps = 7
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = longPressZoneName.isNotBlank(),
+                    onClick = {
+                        viewModel.addSafePlace(
+                            name = longPressZoneName,
+                            lat = tappedLatLng.latitude,
+                            lng = tappedLatLng.longitude,
+                            radiusMeters = longPressZoneRadius,
+                            isPrivate = longPressZonePrivate
+                        )
+                        longPressZoneCoords = null
+                        longPressZoneName = ""
+                    }
+                ) { Text("Simpan Zon") }
+            },
+            dismissButton = {
+                TextButton(onClick = { longPressZoneCoords = null }) { Text("Batal") }
+            }
+        )
+    }
+
     uiState.activeSosAlert?.let { alertMsg ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissSosAlert() },
@@ -855,6 +948,14 @@ fun MapScreen(
                                     }
                                 }
                                 false
+                            }
+                            // Tekan lama (Long-Press) mana-mana titik atas peta untuk cipta Zon Selamat terus di lokasi tersebut
+                            map.addOnMapLongClickListener { point ->
+                                longPressZoneCoords = point
+                                longPressZoneName = ""
+                                longPressZoneRadius = 150f
+                                longPressZonePrivate = false
+                                true
                             }
                             map.setStyle(buildMapStyle(mapStyleMode)) { style ->
                                 applyStyleTheme(style, mapStyleMode)
