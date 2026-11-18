@@ -16,6 +16,7 @@ import com.muzrc.keluargamy360.KeluargaApp
 import com.muzrc.keluargamy360.MainActivity
 import com.muzrc.keluargamy360.data.local.SecureStorage
 import com.muzrc.keluargamy360.data.repository.LocationRepository
+import com.muzrc.keluargamy360.util.NotificationSoundHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -112,15 +113,21 @@ class GeofenceReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(context, KeluargaApp.CHANNEL_GEOFENCE_ID)
+        val soundUri = NotificationSoundHelper.getGeofenceSoundUri(context)
+        val builder = NotificationCompat.Builder(context, NotificationSoundHelper.getGeofenceChannelId(context))
             .setSmallIcon(android.R.drawable.ic_dialog_map)
             .setContentTitle("Kemas Kini Zon: $title")
             .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setSilent(true)
+            .setPriority(if (soundUri != null) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .build()
+
+        if (soundUri != null) {
+            builder.setSound(soundUri)
+        } else {
+            builder.setSilent(true)
+        }
+        val notification = builder.build()
 
         NotificationManagerCompat.from(context).notify(title.hashCode(), notification)
     }

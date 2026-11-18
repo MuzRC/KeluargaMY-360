@@ -35,6 +35,7 @@ import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.AppDiagnosticLogHelper
 import com.muzrc.keluargamy360.util.BatteryHelper
 import com.muzrc.keluargamy360.util.CrashAlertBus
+import com.muzrc.keluargamy360.util.NotificationSoundHelper
 import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import com.muzrc.keluargamy360.util.PermissionHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
@@ -693,15 +694,21 @@ class LocationTrackingService : Service(), SensorEventListener {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, KeluargaApp.CHANNEL_GEOFENCE_ID)
+        val soundUri = NotificationSoundHelper.getGeofenceSoundUri(this)
+        val builder = NotificationCompat.Builder(this, NotificationSoundHelper.getGeofenceChannelId(this))
             .setSmallIcon(android.R.drawable.ic_dialog_map)
             .setContentTitle(title)
             .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setSilent(true)
+            .setPriority(if (soundUri != null) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
-            .build()
+
+        if (soundUri != null) {
+            builder.setSound(soundUri)
+        } else {
+            builder.setSilent(true)
+        }
+        val notification = builder.build()
 
         NotificationManagerCompat.from(this).notify(title.hashCode(), notification)
     }
