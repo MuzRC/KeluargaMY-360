@@ -4,9 +4,14 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.app.Activity
 import android.location.Location
+import android.media.RingtoneManager
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -37,6 +42,7 @@ import com.muzrc.keluargamy360.util.ApkUpdateInstaller
 import com.muzrc.keluargamy360.util.AppBatteryLogHelper
 import com.muzrc.keluargamy360.util.AppDiagnosticLogHelper
 import com.muzrc.keluargamy360.util.DiagnosticCategory
+import com.muzrc.keluargamy360.util.NotificationSoundHelper
 import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
@@ -92,6 +98,56 @@ fun MainDashboardScreen(
     var diagnosticLogs by remember { mutableStateOf(AppDiagnosticLogHelper.readLogs(context, null)) }
     var todayTripSummary by remember { mutableStateOf(AppDiagnosticLogHelper.getTodayTripSummary(context)) }
     var offlineQueueCount by remember { mutableIntStateOf(OfflineRouteQueueHelper.peekAll(context).size) }
+
+    // Tetapan Bunyi Notifikasi Tersuai (Zon Selamat & SOS)
+    var geofenceSoundLabel by remember { mutableStateOf(NotificationSoundHelper.getGeofenceSoundLabel(context)) }
+    var sosSoundLabel by remember { mutableStateOf(NotificationSoundHelper.getSosSoundLabel(context)) }
+    var pickingSoundForSos by remember { mutableStateOf(false) }
+
+    val ringtonePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            @Suppress("DEPRECATION")
+            val pickedUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+            } else {
+                result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            }
+            if (pickingSoundForSos) {
+                NotificationSoundHelper.setSosSound(context, pickedUri)
+                sosSoundLabel = NotificationSoundHelper.getSosSoundLabel(context)
+                Toast.makeText(context, "Bunyi amaran SOS dikemas kini: $sosSoundLabel", Toast.LENGTH_SHORT).show()
+            } else {
+                NotificationSoundHelper.setGeofenceSound(context, pickedUri)
+                geofenceSoundLabel = NotificationSoundHelper.getGeofenceSoundLabel(context)
+                Toast.makeText(context, "Bunyi zon selamat dikemas kini: $geofenceSoundLabel", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val audioFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            if (pickingSoundForSos) {
+                NotificationSoundHelper.setSosSound(context, uri)
+                sosSoundLabel = NotificationSoundHelper.getSosSoundLabel(context)
+                Toast.makeText(context, "Fail audio SOS dipilih: $sosSoundLabel", Toast.LENGTH_SHORT).show()
+            } else {
+                NotificationSoundHelper.setGeofenceSound(context, uri)
+                geofenceSoundLabel = NotificationSoundHelper.getGeofenceSoundLabel(context)
+                Toast.makeText(context, "Fail audio zon selamat dipilih: $geofenceSoundLabel", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     LaunchedEffect(selectedTab, safetyLogMode, diagCategoryFilter) {
         if (selectedTab == 3) {
@@ -1458,6 +1514,91 @@ fun MainDashboardScreen(
                                         valueRange = 80f..140f,
                                         steps = 5
                                     )
+                                }
+                            }
+                        }
+
+                        // Kad Tetapan Bunyi Notifikasi Tersuai (Nada Sistem / Fail Audio MP3)
+                        Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.NotificationsActive, null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Bunyi Notifikasi Tersuai", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                }
+
+                                // 1. Bunyi Zon Selamat (Masuk / Keluar Zon)
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Zon Selamat (Masuk / Keluar Zon)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "Semasa: $geofenceSoundLabel",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                pickingSoundForSos = false
+                                                val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Pilih Bunyi Zon Selamat")
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, NotificationSoundHelper.getGeofenceSoundUri(context))
+                                                }
+                                                ringtonePickerLauncher.launch(intent)
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Nada Sistem", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                pickingSoundForSos = false
+                                                audioFilePickerLauncher.launch(arrayOf("audio/*"))
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Fail MP3/Audio", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                }
+
+                                HorizontalDivider()
+
+                                // 2. Bunyi Amaran Kecemasan SOS
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("Amaran Kecemasan SOS", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "Semasa: $sosSoundLabel",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                pickingSoundForSos = true
+                                                val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Pilih Bunyi Amaran SOS")
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, NotificationSoundHelper.getSosSoundUri(context))
+                                                }
+                                                ringtonePickerLauncher.launch(intent)
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Nada Penggera", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                pickingSoundForSos = true
+                                                audioFilePickerLauncher.launch(arrayOf("audio/*"))
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Fail MP3/Audio", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
                                 }
                             }
                         }
