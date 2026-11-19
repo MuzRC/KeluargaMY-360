@@ -47,7 +47,6 @@ import com.muzrc.keluargamy360.util.OfflineRouteQueueHelper
 import com.muzrc.keluargamy360.util.AppUpdateHelper
 import com.muzrc.keluargamy360.util.AppUpdateResult
 import com.muzrc.keluargamy360.util.BatteryHelper
-import com.muzrc.keluargamy360.util.CrashAlertBus
 import com.muzrc.keluargamy360.util.DeviceRingerHelper
 import com.muzrc.keluargamy360.util.PrivateZoneLogHelper
 import com.muzrc.keluargamy360.util.RoadDistanceHelper
@@ -66,7 +65,6 @@ fun MainDashboardScreen(
 ) {
     var selectedTab by remember { mutableIntStateOf(2) }
     val uiState by mapViewModel.uiState.collectAsState()
-    val crashDetected by CrashAlertBus.crashDetected.collectAsState()
     val apkDownloadState by ApkUpdateInstaller.downloadState.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -329,65 +327,6 @@ fun MainDashboardScreen(
                     }
                 ) {
                     Text(if (isDownloading) "Sembunyi" else "Nanti")
-                }
-            }
-        )
-    }
-
-    // Pengesan Impak Kenderaan: Kiraan undur 20 saat sebelum hantar SOS automatik
-    if (crashDetected) {
-        var secondsRemaining by remember { mutableIntStateOf(20) }
-
-        LaunchedEffect(Unit) {
-            DeviceRingerHelper.ringLoudlyFor15Seconds(context)
-            while (secondsRemaining > 0) {
-                delay(1000L)
-                secondsRemaining--
-            }
-            if (CrashAlertBus.crashDetected.value) {
-                CrashAlertBus.dismissCrashCountdown()
-                DeviceRingerHelper.stopRinging()
-                mapViewModel.triggerSos("IMPAK KENDERAAN DIKESAN")
-            }
-        }
-
-        AlertDialog(
-            onDismissRequest = {},
-            icon = { Icon(Icons.Default.CarCrash, null, tint = Color.Red, modifier = Modifier.size(44.dp)) },
-            title = {
-                Text(
-                    "IMPAK KUAT DIKESAN!",
-                    fontWeight = FontWeight.Bold,
-                    color = Color.Red,
-                    textAlign = TextAlign.Center
-                )
-            },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        "Amaran kecemasan SOS automatik akan dihantar kepada keluarga dalam:",
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        text = "$secondsRemaining saat",
-                        style = MaterialTheme.typography.displaySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.Red
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        CrashAlertBus.dismissCrashCountdown()
-                        DeviceRingerHelper.stopRinging()
-                        Toast.makeText(context, "Amaran impak dibatalkan.", Toast.LENGTH_SHORT).show()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("BATAL — SAYA SELAMAT", fontWeight = FontWeight.Bold)
                 }
             }
         )
@@ -879,6 +818,7 @@ fun MainDashboardScreen(
                                                 log.type == "BATTERY" -> Icons.Default.BatteryAlert
                                                 log.type == "SPEED" -> Icons.Default.Speed
                                                 log.type == "GEOFENCE" -> Icons.Default.Place
+                                                log.type == "STOP_ALERT" -> Icons.Default.PauseCircleOutline
                                                 log.type == "RING" -> Icons.Default.NotificationsActive
                                                 else -> Icons.Default.Info
                                             }
@@ -1498,8 +1438,34 @@ fun MainDashboardScreen(
                                 }
 
                                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                                    Text("Pengesan Impak Kenderaan (> 25 km/j)", modifier = Modifier.weight(1f))
-                                    Switch(checked = uiState.crashDetectionEnabled, onCheckedChange = { mapViewModel.toggleCrashDetection(it) })
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Amaran Berhenti Lama Luar Zon (${uiState.extendedStopMinutes} min)")
+                                        Text(
+                                            "Maklum keluarga jika kereta berhenti lama di luar zon selamat",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = uiState.extendedStopAlertEnabled,
+                                        onCheckedChange = { mapViewModel.toggleExtendedStopAlert(it) }
+                                    )
+                                }
+
+                                if (uiState.extendedStopAlertEnabled) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        listOf(15, 20, 30, 45).forEach { mins ->
+                                            FilterChip(
+                                                selected = uiState.extendedStopMinutes == mins,
+                                                onClick = { mapViewModel.setExtendedStopMinutes(mins) },
+                                                label = { Text("${mins}m", style = MaterialTheme.typography.labelSmall) },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
