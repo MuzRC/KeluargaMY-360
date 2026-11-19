@@ -116,6 +116,8 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var sentStopWarningToDriver: Boolean = false
     private var sentExtendedStopToFamily: Boolean = false
     private var lastExtendedStopAlertMs: Long = 0L
+    private var walkingDetectedStartMs: Long = 0L
+    private var stopSnoozeReceiver: BroadcastReceiver? = null
 
     // Mod Active Viewing (GPS 2.5s automatik luput selepas 10 minit)
     private var familyWatchListener: ListenerRegistration? = null
@@ -375,8 +377,36 @@ class LocationTrackingService : Service(), SensorEventListener {
             }
         }
 
+        setupStopSnoozeReceiver()
         setupActiveViewingListener()
         startAppBatteryMonitorLoop()
+    }
+
+    private fun setupStopSnoozeReceiver() {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_SNOOZE_STOP_ALERT) return
+                val now = System.currentTimeMillis()
+                // Tangguhkan pemasa berhenti selama 30 minit & padam notifikasi peringatan
+                lastMovementTimeMs = now + 1_800_000L
+                sentStopWarningToDriver = false
+                sentExtendedStopToFamily = false
+                NotificationManagerCompat.from(this@LocationTrackingService)
+                    .cancel(STOP_WARNING_NOTIF_ID)
+                AppDiagnosticLogHelper.logServiceLifecycle(
+                    context = this@LocationTrackingService,
+                    eventTitle = "Amaran Berhenti Ditangguhkan (+30 Minit)",
+                    extraDetail = "Pengguna menekan 'Singgah Sekejap (+30m)'"
+                )
+            }
+        }
+        stopSnoozeReceiver = receiver
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter(ACTION_SNOOZE_STOP_ALERT),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     /**
@@ -454,9 +484,21 @@ class LocationTrackingService : Service(), SensorEventListener {
                             if (event.activityType == DetectedActivity.STILL) {
                                 isSystemConfirmedStill = true
                                 consecutiveValidMoves = 0
+                                walkingDetectedStartMs = 0L
                             } else if (event.activityType in WAKEUP_ACTIVITIES) {
                                 isSystemConfirmedStill = false
                                 val now = System.currentTimeMillis()
+
+                                // Jika bertukar kepada berjalan kaki selepas memandu, mula kira tempoh berjalan
+                                if (event.activityType == DetectedActivity.WALKING ||
+                                    event.activityType == DetectedActivity.RUNNING
+                                ) {
+                                    if (walkingDetectedStartMs == 0L) {
+                                        walkingDetectedStartMs = now
+                                    }
+                                } else {
+                                    walkingDetectedStartMs = 0L
+                                }
                                 val actName = when (event.activityType) {
                                     DetectedActivity.IN_VEHICLE -> "Dalam Kenderaan"
                                     DetectedActivity.ON_BICYCLE -> "Berbasikal"
@@ -756,6 +798,46 @@ class LocationTrackingService : Service(), SensorEventListener {
         }
     }
 
+    private fun showDriverStopPreWarningNotification(minsStopped: Int, thresholdMinutes: Int) {
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        val openIntent = Intent(this, MainActivity::class.java)
+        val openPendingIntent = PendingIntent.getActivity(
+            this,
+            STOP_WARNING_NOTIF_ID,
+            openIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val snoozeIntent = Intent(ACTION_SNOOZE_STOP_ALERT).setPackage(packageName)
+        val snoozePendingIntent = PendingIntent.getBroadcast(
+            this,
+            STOP_WARNING_NOTIF_ID + 1,
+            snoozeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, NotificationSoundHelper.getGeofenceChannelId(this))
+            .setSmallIcon(android.R.drawable.ic_dialog_map)
+            .setContentTitle("Semakan Berhenti ($minsStopped Minit)")
+            .setContentText("Berhenti di luar zon selamat. Keluarga dimaklumkan pada minit ke-$thresholdMinutes.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(openPendingIntent)
+            .addAction(
+                android.R.drawable.ic_media_pause,
+                "Singgah Sekejap (+30m)",
+                snoozePendingIntent
+            )
+            .build()
+
+        NotificationManagerCompat.from(this).notify(STOP_WARNING_NOTIF_ID, notification)
+    }
+
     private fun showPrivateZoneNotification(title: String, body: String) {
         if (ActivityCompat.checkSelfPermission(
                 this,
@@ -816,6 +898,23 @@ class LocationTrackingService : Service(), SensorEventListener {
         val wasDrivingTrip = currentTripDistanceMeters >= 2000f || currentTripPeakSpeedKmh >= 35f
         if (!wasDrivingTrip) return
 
+        // Jika sistem mengesan pemandu keluar berjalan kaki >= 30 saat (contohnya masuk kedai/pasar raya),
+        // anggap pengguna sudah meletak kenderaan dengan selamat dan reset pemasa berhenti lama.
+        if (walkingDetectedStartMs > 0L && (now - walkingDetectedStartMs) >= 30_000L) {
+            currentTripDistanceMeters = 0f
+            currentTripPeakSpeedKmh = 0f
+            sentStopWarningToDriver = false
+            sentExtendedStopToFamily = false
+            walkingDetectedStartMs = 0L
+            NotificationManagerCompat.from(this).cancel(STOP_WARNING_NOTIF_ID)
+            AppDiagnosticLogHelper.logServiceLifecycle(
+                context = this,
+                eventTitle = "Pemasa Berhenti Ditetapkan Semula (Berjalan Kaki)",
+                extraDetail = "Pengguna dikesan berjalan kaki selepas memandu"
+            )
+            return
+        }
+
         val stationaryMs = now - lastMovementTimeMs
         val thresholdMinutes = secureStorage.getExtendedStopMinutes()
         val thresholdMs = thresholdMinutes * 60_000L
@@ -840,13 +939,11 @@ class LocationTrackingService : Service(), SensorEventListener {
         }
 
         // Peringatan awal kepada pemandu 5 minit sebelum amaran dihantar kepada keluarga
+        // Dilengkapi butang tindakan pantas "Singgah Sekejap (+30m)" terus pada notifikasi
         if (!sentStopWarningToDriver && stationaryMs in driverPreWarnMs until thresholdMs) {
             sentStopWarningToDriver = true
             val minsStopped = (stationaryMs / 60_000L).toInt()
-            showPrivateZoneNotification(
-                title = "Semakan Berhenti ($minsStopped Minit)",
-                body = "Anda berhenti di luar zon selamat. Keluarga akan dimaklumkan jika terus berhenti sehingga $thresholdMinutes minit."
-            )
+            showDriverStopPreWarningNotification(minsStopped, thresholdMinutes)
             return
         }
 
@@ -1018,6 +1115,11 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        try {
+            stopSnoozeReceiver?.let { unregisterReceiver(it) }
+        } catch (_: Exception) {
+        }
+        stopSnoozeReceiver = null
         familyWatchListener?.remove()
         monitorJob?.cancel()
         teardownActivityRecognition()
@@ -1045,7 +1147,9 @@ class LocationTrackingService : Service(), SensorEventListener {
 
     companion object {
         private const val NOTIFICATION_ID = 3601
+        private const val STOP_WARNING_NOTIF_ID = 3605
         private const val ACTION_ACTIVITY_TRANSITION = "com.muzrc.keluargamy360.ACTION_ACTIVITY_TRANSITION"
+        private const val ACTION_SNOOZE_STOP_ALERT = "com.muzrc.keluargamy360.ACTION_SNOOZE_STOP_ALERT"
         private const val IDLE_THRESHOLD_MS = 120_000L              // Masuk mod tidur selepas 2 minit pegun
         private const val STATIONARY_COOLDOWN_MS = 30_000L          // Tempoh bertenang 30s selepas masuk mod tidur
         private const val SUSTAINED_WAKEUP_MS = 8_000L              // Sandaran accelerometer: gerakan berterusan 8s
