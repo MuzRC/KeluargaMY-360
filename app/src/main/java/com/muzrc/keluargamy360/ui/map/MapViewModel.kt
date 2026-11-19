@@ -68,7 +68,8 @@ data class MapUiState(
     val lowBatteryAlertEnabled: Boolean = true,
     val speedAlertEnabled: Boolean = true,
     val speedLimitKmh: Float = 110f,
-    val crashDetectionEnabled: Boolean = true
+    val extendedStopAlertEnabled: Boolean = true,
+    val extendedStopMinutes: Int = 20
 )
 
 class MapViewModel(
@@ -88,7 +89,8 @@ class MapViewModel(
             lowBatteryAlertEnabled = secureStorage.isLowBatteryAlertEnabled(),
             speedAlertEnabled = secureStorage.isSpeedAlertEnabled(),
             speedLimitKmh = secureStorage.getSpeedLimitKmh(),
-            crashDetectionEnabled = secureStorage.isCrashDetectionEnabled()
+            extendedStopAlertEnabled = secureStorage.isExtendedStopAlertEnabled(),
+            extendedStopMinutes = secureStorage.getExtendedStopMinutes()
         )
     )
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
@@ -314,7 +316,7 @@ class MapViewModel(
 
                     when (alertType) {
                         "SOS" -> _uiState.update { it.copy(activeSosAlert = msg) }
-                        "CHECKIN", "BATTERY", "SPEED", "GEOFENCE" -> {
+                        "CHECKIN", "BATTERY", "SPEED", "GEOFENCE", "STOP_ALERT" -> {
                             _uiState.update { it.copy(statusMessage = msg) }
                         }
                     }
@@ -583,9 +585,14 @@ class MapViewModel(
         _uiState.update { it.copy(speedLimitKmh = limitKmh) }
     }
 
-    fun toggleCrashDetection(enabled: Boolean) {
-        secureStorage.setCrashDetectionEnabled(enabled)
-        _uiState.update { it.copy(crashDetectionEnabled = enabled) }
+    fun toggleExtendedStopAlert(enabled: Boolean) {
+        secureStorage.setExtendedStopAlertEnabled(enabled)
+        _uiState.update { it.copy(extendedStopAlertEnabled = enabled) }
+    }
+
+    fun setExtendedStopMinutes(minutes: Int) {
+        secureStorage.setExtendedStopMinutes(minutes)
+        _uiState.update { it.copy(extendedStopMinutes = minutes) }
     }
 
     fun sendSafeCheckIn() {
