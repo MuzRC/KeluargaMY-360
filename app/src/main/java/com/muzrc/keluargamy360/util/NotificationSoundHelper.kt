@@ -54,7 +54,7 @@ object NotificationSoundHelper {
 
     fun getSosSoundLabel(context: Context): String {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_SOS_LABEL, null) ?: "Penggera Lalai Sistem"
+            .getString(KEY_SOS_LABEL, null) ?: "Nada Notifikasi Lalai (Tenang)"
     }
 
     fun resolveSoundDisplayName(context: Context, uri: Uri?): String {
@@ -104,7 +104,7 @@ object NotificationSoundHelper {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val oldChannelId = getSosChannelId(context)
         val nextVer = prefs.getInt(KEY_SOS_VERSION, 0) + 1
-        val label = customLabel ?: if (uri == null) "Penggera Lalai Sistem" else resolveSoundDisplayName(context, uri)
+        val label = customLabel ?: if (uri == null) "Nada Notifikasi Lalai (Tenang)" else resolveSoundDisplayName(context, uri)
 
         prefs.edit()
             .putString(KEY_SOS_URI, uri?.toString().orEmpty())
@@ -160,15 +160,14 @@ object NotificationSoundHelper {
             }
         }
 
-        // 3. Saluran Amaran Kecemasan SOS
+        // 3. Saluran Amaran Kecemasan SOS (Nada notifikasi tenang tanpa siren mengejut)
         val customSosUri = getSosSoundUri(context)
         val effectiveSosUri = customSosUri
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
         val sosAttrs = AudioAttributes.Builder()
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
             .build()
 
         val sosChannel = NotificationChannel(
@@ -178,7 +177,7 @@ object NotificationSoundHelper {
         ).apply {
             description = context.getString(R.string.channel_sos_desc)
             enableVibration(true)
-            vibrationPattern = longArrayOf(0, 500, 250, 500, 250, 800)
+            vibrationPattern = longArrayOf(0, 300, 200, 300)
             setSound(effectiveSosUri, sosAttrs)
         }
 
