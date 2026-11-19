@@ -63,11 +63,17 @@ class SecureStorage(context: Context) {
 
     fun getSpeedLimitKmh(): Float = prefs.getFloat(KEY_SPEED_LIMIT_KMH, 110f)
 
-    fun setCrashDetectionEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_CRASH_DETECTION, enabled).apply()
+    fun setExtendedStopAlertEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_EXTENDED_STOP_ALERT, enabled).apply()
     }
 
-    fun isCrashDetectionEnabled(): Boolean = prefs.getBoolean(KEY_CRASH_DETECTION, true)
+    fun isExtendedStopAlertEnabled(): Boolean = prefs.getBoolean(KEY_EXTENDED_STOP_ALERT, true)
+
+    fun setExtendedStopMinutes(minutes: Int) {
+        prefs.edit().putInt(KEY_EXTENDED_STOP_MINUTES, minutes.coerceIn(15, 60)).apply()
+    }
+
+    fun getExtendedStopMinutes(): Int = prefs.getInt(KEY_EXTENDED_STOP_MINUTES, 20)
 
     fun saveMemberNickname(uid: String, nickname: String) {
         val clean = nickname.trim()
@@ -206,7 +212,8 @@ class SecureStorage(context: Context) {
         private const val KEY_LOW_BATTERY_ALERT = "low_battery_alert"
         private const val KEY_SPEED_ALERT_ENABLED = "speed_alert_enabled"
         private const val KEY_SPEED_LIMIT_KMH = "speed_limit_kmh"
-        private const val KEY_CRASH_DETECTION = "crash_detection_enabled"
+        private const val KEY_EXTENDED_STOP_ALERT = "extended_stop_alert_enabled"
+        private const val KEY_EXTENDED_STOP_MINUTES = "extended_stop_minutes"
         private const val KEY_CACHED_USER_NAME = "cached_user_display_name"
         private const val KEY_FAMILY_PLACES = "family_safe_places"
         private const val KEY_PRIVATE_PLACES = "private_safe_places"
