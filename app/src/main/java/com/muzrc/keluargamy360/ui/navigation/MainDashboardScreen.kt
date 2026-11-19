@@ -1544,16 +1544,16 @@ fun MainDashboardScreen(
                                             onClick = {
                                                 pickingSoundForSos = true
                                                 val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
-                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
                                                     putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Pilih Bunyi Amaran SOS")
-                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                                                    putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
                                                     putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, NotificationSoundHelper.getSosSoundUri(context))
                                                 }
                                                 ringtonePickerLauncher.launch(intent)
                                             },
                                             modifier = Modifier.weight(1f)
                                         ) {
-                                            Text("Nada Penggera", style = MaterialTheme.typography.labelSmall)
+                                            Text("Nada Notifikasi", style = MaterialTheme.typography.labelSmall)
                                         }
                                         OutlinedButton(
                                             onClick = {
